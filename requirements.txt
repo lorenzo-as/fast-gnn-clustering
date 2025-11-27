@@ -1,0 +1,16 @@
+numpy
+scipy
+matplotlib
+h5py
+scikit-learn
+tqdm
+requests
+
+keras==3.12.0
+tensorflow==2.20.0
+tensorflow-model-optimization
+
+# QKeras v3
+--index-url https://test.pypi.org/simple/
+--extra-index-url https://pypi.org/simple/
+qkeras-v3==1.0.3
