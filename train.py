@@ -1,10 +1,15 @@
 import os
 import json
 import pickle
-import keras
+import numpy as np
 from qgravnet import QGravNetFactory
 from data import load_processed
 from utils import response_rmse
+
+try:
+    import keras 
+except ImportError:
+    from tensorflow import keras
 
 DATA_FILE = "data/toy_calo/toy_calo_processed.h5"
 TRAIN_DIR = "results/train1"
@@ -19,9 +24,9 @@ model_cfg = {
 
 optimizer_cfg = {
     "optimizer": "adam",
-    "loss": {"regression": "mse", "classification": "binary_crossentropy"},
+    "loss": {"regression": response_rmse, "classification": "binary_crossentropy"},
     "loss_weights": {"regression": 0.9, "classification": 0.1},
-    "metrics": {"regression": [response_rmse], "classification": ["accuracy"]},
+    "metrics": {"classification": ["accuracy"]},
 }
 
 callbacks = [
@@ -62,7 +67,7 @@ if __name__ == "__main__":
         pickle.dump(model_cfg, f)
 
     with open(os.path.join(TRAIN_DIR, "history.json"), "w") as f:
-        json.dump(history.history, f)
+        json.dump(history.history, f, default=lambda o: o.item() if isinstance(o, np.generic) else o)
 
     with open(os.path.join(TRAIN_DIR, "info.json"), "w") as f:
         info = {
