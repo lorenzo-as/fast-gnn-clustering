@@ -1,14 +1,24 @@
 import os
 import pickle
 import json
-from keras import ops
 
+try:
+    from keras import ops
 
-def response_rmse(y_true, y_pred):
-    y_true = ops.reshape(y_true, (-1,))
-    y_pred = ops.reshape(y_pred, (-1,))
-    response = ops.divide_no_nan(y_pred, y_true)
-    return ops.sqrt(ops.mean(ops.square(response - 1.0)))
+    def response_rmse(y_true, y_pred):
+        y_true = ops.reshape(y_true, (-1,))
+        y_pred = ops.reshape(y_pred, (-1,))
+        response = ops.divide_no_nan(y_pred, y_true)
+        return ops.sqrt(ops.mean(ops.square(response - 1.0)))
+
+except ImportError:
+    import tensorflow as tf
+
+    def response_rmse(y_true, y_pred):
+        y_true = tf.reshape(y_true, (-1,))
+        y_pred = tf.reshape(y_pred, (-1,))
+        response = tf.math.divide_no_nan(y_pred, y_true)
+        return tf.sqrt(tf.reduce_mean(tf.square(response - 1.0)))
 
 
 def load_run(train_dir):
