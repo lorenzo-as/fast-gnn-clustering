@@ -2,14 +2,15 @@ import os
 import json
 import pickle
 import numpy as np
+from pathlib import Path
 from qgravnet import QGravNetFactory
-from data import load_processed
 from utils import response_rmse
+from data import load_processed 
 
 try:
     import keras 
 except ImportError:
-    from tensorflow import keras
+    from tensorflow import keras # type: ignore
 
 DATA_FILE = "data/toy_calo/toy_calo_processed.h5"
 TRAIN_DIR = "results/train1"
@@ -38,6 +39,7 @@ n_epochs = 100
 batch_size = 32
 
 if __name__ == "__main__":
+    assert Path(TRAIN_DIR).parent.exists(), f"Parent directory {Path(TRAIN_DIR).parent} does not exist."
     os.makedirs(TRAIN_DIR, exist_ok=False)
 
     D = load_processed(DATA_FILE)

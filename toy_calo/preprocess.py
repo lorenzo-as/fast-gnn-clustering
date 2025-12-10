@@ -1,5 +1,6 @@
 import os
 import matplotlib.pyplot as plt
+from pathlib import Path
 from data import (
     fetch_dataset,
     load_raw_dataset,
@@ -13,7 +14,7 @@ from data import (
 FETCH = True  # set True to download the Zenodo files
 N_FILES = 1
 
-DATASET_DIR = "data/toy_calo"
+DATASET_DIR = "data/toy_calo_mini"
 RAW_DIR = os.path.join(DATASET_DIR, "raw")
 
 OUTFILE = os.path.join(DATASET_DIR, "toy_calo_processed.h5")
@@ -21,6 +22,7 @@ RAW_PLOT = os.path.join(DATASET_DIR, "raw_data.png")
 NORM_PLOT = os.path.join(DATASET_DIR, "normalized_data.png")
 
 if __name__ == "__main__":
+    assert Path(DATASET_DIR).parent.exists(), f"Parent directory {Path(DATASET_DIR).parent} does not exist."
     os.makedirs(RAW_DIR, exist_ok=True)
 
     if FETCH:
