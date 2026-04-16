@@ -1,0 +1,172 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fast-gnn-clustering"
+version = "0.1.0"
+description = "Fast GNN clustering for HGCAL object condensation studies"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "awkward>=2.9.0",
+  "colliderml>=0.3.1",
+  "datasets>=4.8.4",
+  "hydra-core>=1.3",
+  "numpy<2",
+  "omegaconf>=2.3",
+  "particle>=0.26.1",
+  "polars>=1.0",
+  "pyarrow>=23.0.1",
+  "pyyaml>=6.0",
+  "quantized-gravnet>=0.1.0",
+  "tqdm>=4.67.3",
+  "uproot>=5.7.3"
+]
+
+[project.scripts]
+fastgnn-convert-cmssw = "fastgnn.scripts.convert_cmssw:main"
+fastgnn-train = "fastgnn.scripts.train:main"
+
+[dependency-groups]
+dev = [
+  "coverage[toml]",
+  "deptry",
+  "pre-commit>=4.5.1",
+  "pytest-cov",
+  "pytest-xdist",
+  "pytest>=8.0",
+  "pyright",
+  "radon",
+  "ruff"
+]
+notebooks = [
+  "marimo[recommended]>=0.23.3",
+  "matplotlib>=3.10.8",
+  "mplhep>=1.1.2",
+  "plotly>=6.6.0"
+]
+
+[tool.uv.sources]
+quantized-gravnet = {git = "https://github.com/lorenzo-as/quantized-gravnet", tag = "v0.1.0"}
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fastgnn"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [
+  "checkpoints",
+  "data",
+  "datasets",
+  "mlruns",
+  "models",
+  "notebooks/__marimo__/session",
+  "outputs",
+  "plots",
+  "wandb"
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = [
+  "ARG",
+  "B",
+  "C4",
+  "E",
+  "ERA",
+  "F",
+  "I",
+  "LOG",
+  "NPY",
+  "PD",
+  "PERF",
+  "PIE",
+  "PT",
+  "PTH",
+  "RUF",
+  "SIM",
+  "T20",
+  "UP",
+  "W"
+]
+ignore = [
+  "B008",
+  "E501"
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["fastgnn"]
+combine-as-imports = true
+force-sort-within-sections = true
+
+[tool.ruff.lint.per-file-ignores]
+"notebooks/**/*.py" = ["E402", "ERA", "F401", "F811", "T20"]
+"scripts/**/*.py" = ["T20"]
+"tests/**/*.py" = ["ARG", "S101", "T20"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = [
+  "-ra",
+  "--import-mode=importlib",
+  "--strict-config",
+  "--strict-markers"
+]
+
+[tool.coverage.run]
+branch = true
+source = ["fastgnn"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "if __name__ == .__main__.:",
+  "raise NotImplementedError"
+]
+
+[tool.pyright]
+pythonVersion = "3.11"
+pythonPlatform = "Linux"
+typeCheckingMode = "basic"
+include = ["src", "tests"]
+exclude = [
+  "**/__pycache__",
+  ".venv",
+  "data",
+  "outputs",
+  "notebooks"
+]
+extraPaths = ["src"]
+venv = ".venv"
+venvPath = "."
+reportMissingTypeStubs = false
+reportArgumentType = false
+reportCallIssue = false
+reportAttributeAccessIssue = false
+reportIndexIssue = false
+reportOperatorIssue = false
+reportGeneralTypeIssues = false
+
+[tool.deptry]
+extend_exclude = [
+  "data",
+  "outputs",
+  "notebooks"
+]
+known_first_party = [
+  "fastgnn"
+]
+ignore = [
+  "DEP002",
+  "DEP003",
+  "DEP004"
+]

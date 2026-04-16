@@ -1,0 +1,66 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.pyright/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+env/
+venv/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Test / coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Editors
+.vscode/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Marimo generated/session state
+notebooks/__marimo__/session/
+
+# Configs: keep directory structure, ignore actual configs unless explicitly added
+configs/**
+!configs/
+!configs/**/
+!configs/**/.gitkeep
+
+# Data: keep directory structure, ignore actual data
+data/**
+!data/
+!data/**/
+!data/**/.gitkeep
+
+# Outputs: keep directory structure, ignore generated outputs
+outputs/**
+!outputs/
+!outputs/**/
+!outputs/**/.gitkeep
+
+# ML / experiment tracking
+wandb/
+mlruns/
+checkpoints/
+models/
+
+# Data files
+*.root
+*.parquet
+*.csv
+*.h5
+*.hdf5
+*.npz
+*.npy

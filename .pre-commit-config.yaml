@@ -1,0 +1,124 @@
+ci:
+  autoupdate_schedule: monthly
+
+default_stages: [pre-commit]
+
+repos:
+  - repo: local
+    hooks:
+      - id: format-pyproject
+        name: format pyproject.toml
+        entry: toml-sort -i --no-sort-tables
+        language: python
+        files: ^pyproject\.toml$
+        additional_dependencies: ["toml-sort==0.23.1"]
+
+      - id: pyright
+        name: pyright
+        entry: uv run pyright --project pyproject.toml src
+        language: system
+        pass_filenames: false
+        stages: [manual]
+
+      - id: pytest
+        name: pytest
+        entry: uv run pytest tests -q
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: deptry
+        name: deptry
+        entry: uv run deptry .
+        language: system
+        pass_filenames: false
+        stages: [manual]
+
+      - id: radon-complexity
+        name: radon complexity
+        entry: uv run radon cc src -s -n C
+        language: system
+        pass_filenames: false
+        stages: [manual]
+
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.11.11
+    hooks:
+      - id: uv-lock
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.12
+    hooks:
+      - id: ruff-check
+        types_or: [python, pyi]
+        args: ["--fix", "--exit-non-zero-on-fix"]
+      - id: ruff-format
+        types_or: [python, pyi]
+
+  - repo: https://github.com/python-jsonschema/check-jsonschema
+    rev: 0.31.0
+    hooks:
+      - id: check-github-workflows
+        args: ["--verbose"]
+
+  - repo: https://github.com/abravalheri/validate-pyproject
+    rev: v0.23
+    hooks:
+      - id: validate-pyproject
+        additional_dependencies: ["validate-pyproject-schema-store[all]"]
+
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+      - id: shellcheck
+
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+
+  - repo: https://github.com/woodruffw/zizmor-pre-commit
+    rev: v1.14.2
+    hooks:
+      - id: zizmor
+        stages: [manual]
+
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.31.2
+    hooks:
+      - id: typos
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-ast
+      - id: debug-statements
+      - id: detect-private-key
+
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: pretty-format-json
+        args: ["--no-sort-keys"]
+
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        args: ["--markdown-linebreak-ext=md"]
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+
+      - id: check-added-large-files
+        args: ["--maxkb=5000"]
+
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+      - id: check-case-conflict
+      - id: check-illegal-windows-names
+      - id: check-symlinks
+      - id: destroyed-symlinks
