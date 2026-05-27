@@ -1,0 +1,21 @@
+# @package _global_
+
+input_files:
+  - data/raw/cmssw/v1/NANO_10_000samples-new_pt50-100_merging-0.5cm-0.8_tau-0.root
+output_dir: data/processed/cmssw/v1/NANO_10_000samples-new_pt50-100_merging-0.5cm-0.8_tau/CartesianRecHits-ClusterEnergyThreshold_0GeV
+max_events: null
+overwrite: false
+
+zside: 1
+coordinate_system: cartesian
+preprocessing: rechits_energy_threshold
+hit_min_energy: null
+truth_min_object_energy: 1
+truth_min_visible_energy: 0
+truth_object_energy_field: impact_energy
+filter_truth_by_zside: true
+step_size: null
+
+train_frac: 0.9
+val_frac: 0.05
+seed: 0
