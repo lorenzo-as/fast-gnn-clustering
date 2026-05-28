@@ -106,7 +106,28 @@ combine-as-imports = true
 force-sort-within-sections = true
 
 [tool.ruff.lint.per-file-ignores]
-"notebooks/**/*.py" = ["E402", "ERA", "F401", "F811", "T20"]
+"notebooks/**/*.py" = [
+  "B018",
+  "B905",
+  "C408",
+  "C416",
+  "E402",
+  "ERA",
+  "F401",
+  "F811",
+  "I001",
+  "PERF401",
+  "PT018",
+  "RUF001",
+  "T20"
+]
+"src/fastgnn/data/cmssw/plotting.py" = [
+  "B905",
+  "C408",
+  "RUF001",
+  "RUF002",
+  "RUF005"
+]
 "scripts/**/*.py" = ["T20"]
 "tests/**/*.py" = ["ARG", "S101", "T20"]
 
