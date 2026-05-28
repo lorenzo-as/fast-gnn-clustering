@@ -1,0 +1,28 @@
+name: gravnet_v0
+quantized: false
+max_vertices: 1024
+feature_names: [x, y, z, energy]
+
+n_blocks: 2
+n_neighbours: 8
+n_dimensions: 4
+n_filters: 8
+n_propagate: 8
+n_postgn_dense_blocks: 2
+output_dim: 4
+output_head: oc
+distance_metric: l1
+neighbour_selector: full
+
+dense_layer_dims:
+  input_dense: 8
+  post_gn: 16
+  postgn_block: 16
+  out0: 8
+  out1: 8
+
+gravnet_cfg:
+  fix_coordinate_space: false
+  other_kernel_initializer: glorot_uniform
+
+selector_cfg: {}

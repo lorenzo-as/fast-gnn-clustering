@@ -1,0 +1,46 @@
+name: qgravnet_v0
+quantized: true
+max_vertices: 512
+feature_names: [x, y, z, energy]
+
+n_blocks: 2
+n_neighbours: 8
+n_dimensions: 4
+n_filters: 8
+n_propagate: 8
+n_postgn_dense_blocks: 2
+output_dim: 3
+output_head: oc
+distance_metric: l1
+neighbour_selector: full
+
+dense_layer_dims:
+  input_dense: 8
+  post_gn: 16
+  postgn_block: 16
+  out0: 8
+  out1: 8
+
+quantization:
+  dense_kernel_quantizer: "quantized_bits(8,0,1,alpha=1.0)"
+  dense_bias_quantizer: "quantized_bits(8,0,1,alpha=1.0)"
+
+gravnet_cfg:
+  fix_coordinate_space: false
+
+  coordinate_kernel_quantizer: "quantized_bits(8,0,1,alpha=1.0)"
+  coordinate_bias_quantizer: "quantized_bits(8,0,1,alpha=1.0)"
+  feature_kernel_quantizer: "quantized_bits(8,0,1,alpha=1.0)"
+  feature_bias_quantizer: "quantized_bits(8,0,1,alpha=1.0)"
+  output_kernel_quantizer: "quantized_bits(8,0,1,alpha=1.0)"
+  output_bias_quantizer: "quantized_bits(8,0,1,alpha=1.0)"
+
+  output_activation: "quantized_relu(12,4)"
+  post_gn_activation: "quantized_relu(12,4)"
+  post_gn_out_activation: "quantized_relu(12,4)"
+  post_gn_gex_activation: "quantized_relu(12,4)"
+  post_gn_relu: "quantized_relu(12,4)"
+
+  other_kernel_initializer: glorot_uniform
+
+selector_cfg: {}

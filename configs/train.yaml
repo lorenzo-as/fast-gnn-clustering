@@ -1,0 +1,14 @@
+defaults:
+  - data: cmssw_processed
+  - model: gravnet_v0
+  - training: oc_minimal
+  - _self_
+
+seed: 0
+output_dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+hydra:
+  run:
+    dir: ${output_dir}
+  job:
+    chdir: false

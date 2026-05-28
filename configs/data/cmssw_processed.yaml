@@ -1,0 +1,8 @@
+name: cmssw_processed
+dataset_dir: data/processed/cmssw/v1/NANO_10_000samples-new_pt50-100_merging-0.5cm-0.8_tau/CartesianRecHits-ClusterEnergyThreshold_0GeV
+feature_names:
+  - x
+  - y
+  - z
+  - energy
+max_events: null

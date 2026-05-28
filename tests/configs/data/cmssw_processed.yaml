@@ -1,0 +1,8 @@
+name: cmssw_processed
+dataset_dir: data/processed/cmssw/test
+feature_names:
+  - x
+  - y
+  - z
+  - energy
+max_events: null

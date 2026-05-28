@@ -3,6 +3,7 @@ from pathlib import Path
 import awkward as ak
 import numpy as np
 import pytest
+import tensorflow as tf
 import yaml
 
 from fastgnn.data import CaloDataset, PadCollator
@@ -25,6 +26,8 @@ from fastgnn.data.cmssw.transforms import (
     preprocess_rechits_energy_threshold,
     preprocess_vertices,
 )
+from fastgnn.training.objectcondensation import calc_LV_Lbeta, get_clustering_np
+from fastgnn.training.trainer import _build_optimizer, _train_step
 
 
 @pytest.fixture
@@ -151,6 +154,22 @@ def test_compute_normalization_accepts_awkward_records() -> None:
     assert normalization["mean"] == [0.5, 0.0, 100.0, 3.0]
 
 
+def test_get_clustering_np_skips_already_assigned_seeds() -> None:
+    betas = np.array([0.9, 0.8, 0.7], dtype=np.float32)
+    coords = np.array(
+        [
+            [0.0, 0.0],
+            [0.4, 0.0],
+            [0.75, 0.0],
+        ],
+        dtype=np.float32,
+    )
+
+    clustering = get_clustering_np(betas, coords, tbeta=0.5, td=0.5)
+
+    assert clustering.tolist() == [0, 0, 2]
+
+
 def test_feature_names_are_required(tmp_path: Path) -> None:
     records = [
         _event_record(
@@ -216,6 +235,86 @@ def test_dataset_as_padded_and_batches(dataset_dir: Path) -> None:
         )
     )
     np.testing.assert_array_equal(batch["hit_object_id"], padded["hit_object_id"])
+
+
+def test_oc_loss_handles_trailing_events_with_no_signal_hits() -> None:
+    beta = tf.fill((9,), 0.1)
+    coords = tf.zeros((9, 2), dtype=tf.float32)
+    hit_object_id = tf.constant([1, 1, 2, 1, 2, 2, 0, 0, 0], dtype=tf.int32)
+    batch = tf.constant([0, 0, 0, 1, 1, 1, 2, 2, 2], dtype=tf.int32)
+
+    components = calc_LV_Lbeta(
+        beta=beta,
+        cluster_space_coords=coords,
+        cluster_index_per_event=hit_object_id,
+        batch=batch,
+        return_components=True,
+    )
+
+    loss = components["L_V"] + components["L_beta"]
+    assert np.isfinite(float(loss))
+
+
+def test_qgravnet_oc_model_output_shape() -> None:
+    from qgravnet import QGravNetFactory
+
+    model = QGravNetFactory(
+        n_blocks=1,
+        n_neighbours=4,
+        n_dimensions=2,
+        n_filters=8,
+        n_propagate=4,
+        n_postgn_dense_blocks=1,
+        output_dim=3,
+        output_head="oc",
+    ).create_keras_model(n_vertices=16, n_features=4)
+
+    y = model(tf.zeros((2, 16, 4), dtype=tf.float32), training=False)
+
+    assert tuple(y.shape) == (2, 16, 3)
+
+
+def test_one_batch_training_step(dataset_dir: Path) -> None:
+    from qgravnet import QGravNetFactory
+
+    dataset = CaloDataset(dataset_dir, split="train", max_events=2)
+    batch = next(
+        dataset.batches(
+            max_vertices=16,
+            feature_names=["x", "y", "z", "energy"],
+            truncate="random",
+            seed=0,
+            batch_size=1,
+            shuffle=False,
+            normalize_features=True,
+        )
+    )
+    model = QGravNetFactory(
+        n_blocks=1,
+        n_neighbours=4,
+        n_dimensions=2,
+        n_filters=8,
+        n_propagate=4,
+        n_postgn_dense_blocks=1,
+        output_dim=3,
+        output_head="oc",
+    ).create_keras_model(n_vertices=16, n_features=4)
+    train_cfg = {
+        "optimizer": "adam",
+        "lr": 1.0e-3,
+        "global_clipnorm": 1.0,
+        "qmin": 1.0,
+        "s_B": 0.1,
+        "beta_stabilizing": "soft_q_scaling",
+        "beta_term_option": "paper",
+    }
+    optimizer = _build_optimizer(train_cfg)
+
+    loss, components = _train_step(model, batch, optimizer, train_cfg)
+
+    assert np.isfinite(float(loss))
+    assert "L_V" in components
+    assert "L_beta" in components
 
 
 def test_truth_object_energy_threshold_removes_and_remaps_objects() -> None:
