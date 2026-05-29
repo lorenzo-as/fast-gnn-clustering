@@ -15,7 +15,7 @@ import tensorflow as tf
 
 from fastgnn.data.base import CaloDataset
 
-from .objectcondensation import (
+from .objectcondensation_loss import (
     batch_and_mask_to_flat,
     calc_LV_Lbeta,
     formatted_loss_components_string,

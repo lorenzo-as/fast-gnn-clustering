@@ -26,7 +26,7 @@ from fastgnn.data.cmssw.transforms import (
     preprocess_rechits_energy_threshold,
     preprocess_vertices,
 )
-from fastgnn.training.objectcondensation import calc_LV_Lbeta, get_clustering_np
+from fastgnn.training.objectcondensation_loss import calc_LV_Lbeta, get_clustering_np
 from fastgnn.training.trainer import _build_optimizer, _train_step
 
 
