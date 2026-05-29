@@ -30,7 +30,7 @@ from typing import Any
 
 import numpy as np
 
-from .utils import xyz_to_eta_phi
+from fastgnn.geometry import xyz_to_eta_phi
 
 # Branch name prefixes
 HIT_PREFIX = "RecHitsL1THGCALTruthL1THGCAL"
@@ -193,7 +193,7 @@ def _object_count(objects: dict[str, np.ndarray]) -> int:
     if not objects:
         return 0
     first = next(iter(objects.values()))
-    return int(len(first))
+    return len(first)
 
 
 def _filter_truth_objects(objects: dict[str, np.ndarray], cfg: dict[str, Any]) -> np.ndarray:

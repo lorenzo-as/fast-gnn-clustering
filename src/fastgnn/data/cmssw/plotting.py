@@ -7,8 +7,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from fastgnn.data.base import EventRecord
-
-from .utils import HGCAL_Z
+from .constants import HGCAL_Z
 
 _GREEK = [
     ("nu_ebar", "ν̄ₑ"),
@@ -181,7 +180,7 @@ def plot_event_display(
         raise ValueError(f"view must be '2d', '3d', or 'both', got '{view}'")
 
     # Project impact (eta, phi) to x, y at z=318.5 cm (HGCAL face)
-    from .utils import etaphi_to_xy_at_z
+    from fastgnn.geometry import etaphi_to_xy_at_z
 
     c_x, c_y, c_z = etaphi_to_xy_at_z(c_eta, c_phi, z=HGCAL_Z)
     c_names = [_pdgid_to_name(p) for p in c_pdg]

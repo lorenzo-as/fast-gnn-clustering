@@ -36,7 +36,7 @@ from fastgnn.data.cmssw.preprocessing import (
     get_feature_names,
 )
 from fastgnn.data.cmssw.transforms import preprocess_vertices
-from fastgnn.data.cmssw.utils import xyz_to_eta_phi
+from fastgnn.geometry import xyz_to_eta_phi
 
 logger = logging.getLogger(__name__)
 
