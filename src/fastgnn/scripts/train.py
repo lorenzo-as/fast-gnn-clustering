@@ -96,7 +96,10 @@ def _load_datasets(cfg: DictConfig):
 def _build_gravnet_model(cfg: DictConfig, n_features: int):
     from qgravnet import GravNetFactory, QGravNetFactory
 
+    from fastgnn.training.oc_outputs import OCOutputLayout
+
     model_cfg = cfg.model
+    OCOutputLayout.from_config(model_cfg)
     quantized = model_cfg.get("quantized")
     if not isinstance(quantized, bool):
         raise ValueError(

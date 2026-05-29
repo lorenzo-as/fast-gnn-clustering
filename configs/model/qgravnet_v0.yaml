@@ -11,6 +11,14 @@ n_propagate: 8
 n_postgn_dense_blocks: 2
 output_dim: 3
 output_head: oc
+output_layout:
+  beta:
+    index: 0
+    activation: sigmoid
+  cluster_space:
+    start: 1
+    dim: 2
+  regressions: []
 distance_metric: l1
 neighbour_selector: full
 

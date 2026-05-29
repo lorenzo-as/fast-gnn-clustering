@@ -20,6 +20,7 @@ from .objectcondensation_loss import (
     calc_LV_Lbeta,
     formatted_loss_components_string,
 )
+from .oc_outputs import OCOutputLayout, split_oc_outputs
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ def train(
 
     train_cfg = cfg["training"]
     model_cfg = cfg["model"]
+    output_layout = OCOutputLayout.from_config(model_cfg)
 
     optimizer = _build_optimizer(train_cfg)
 
@@ -83,7 +85,7 @@ def train(
                     stacklevel=2,
                 )
                 warned_padding = True
-            loss, components = _train_step(model, batch, optimizer, train_cfg)
+            loss, components = _train_step(model, batch, optimizer, train_cfg, output_layout)
             train_losses.append(float(loss))
             train_components.append(components)
 
@@ -104,7 +106,7 @@ def train(
             truncate=train_cfg.get("truncate", "first"),
             normalize_features=train_cfg.get("normalize_features", True),
         ):
-            loss, components = _eval_step(model, batch, train_cfg)
+            loss, components = _eval_step(model, batch, train_cfg, output_layout)
             val_losses.append(float(loss))
             val_components.append(components)
 
@@ -151,6 +153,7 @@ def _train_step(
     batch: dict,
     optimizer: tf.keras.optimizers.Optimizer,
     train_cfg: dict,
+    output_layout: OCOutputLayout | None = None,
 ) -> tuple[tf.Tensor, dict]:
     """Single training step with GradientTape."""
     batch_tensors = {k: tf.constant(v) for k, v in batch.items()}
@@ -158,12 +161,13 @@ def _train_step(
 
     with tf.GradientTape() as tape:
         outputs = model(batch_tensors["features"], training=True)
-        beta = tf.sigmoid(outputs[..., 0])
-        cluster_coords = outputs[..., 1:]
+        if output_layout is None:
+            output_layout = OCOutputLayout.from_output_dim(int(outputs.shape[-1]))
+        output_slices = split_oc_outputs(outputs, output_layout)
         flat, batch_idx = batch_and_mask_to_flat(
             {
-                "beta": beta,
-                "cluster_coords": cluster_coords,
+                "beta": output_slices.beta,
+                "cluster_coords": output_slices.cluster_coords,
                 "hit_object_id": hit_object_id,
                 "mask": batch_tensors["mask"],
             }
@@ -192,6 +196,7 @@ def _eval_step(
     model: tf.keras.Model,
     batch: dict,
     train_cfg: dict,
+    output_layout: OCOutputLayout | None = None,
 ) -> tuple[tf.Tensor, dict]:
     """
     Single validation step (no gradient).
@@ -203,10 +208,13 @@ def _eval_step(
     hit_object_id = tf.cast(batch_tensors["hit_object_id"], tf.int32)
 
     outputs = model(batch_tensors["features"], training=False)
+    if output_layout is None:
+        output_layout = OCOutputLayout.from_output_dim(int(outputs.shape[-1]))
+    output_slices = split_oc_outputs(outputs, output_layout)
     flat, batch_idx = batch_and_mask_to_flat(
         {
-            "beta": tf.sigmoid(outputs[..., 0]),
-            "cluster_coords": outputs[..., 1:],
+            "beta": output_slices.beta,
+            "cluster_coords": output_slices.cluster_coords,
             "hit_object_id": hit_object_id,
             "mask": batch_tensors["mask"],
         }
