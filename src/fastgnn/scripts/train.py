@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 from collections.abc import Mapping
 from datetime import datetime
 import logging
@@ -14,9 +15,11 @@ from omegaconf import DictConfig, OmegaConf
 
 from fastgnn.utils import get_project_root, resolve_project_path
 
+logger = logging.getLogger(__name__)
+
 
 def main() -> None:
-    """Run a configured CMSSW Object Condensation training job."""
+    """Run a configured training job."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     cfg = _compose_config(sys.argv[1:])
     output_dir = _resolve_output_dir(cfg, sys.argv[1:])
@@ -39,9 +42,18 @@ def main() -> None:
 
 
 def _compose_config(overrides: list[str]) -> DictConfig:
-    config_dir = get_project_root() / "configs"
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--config-name", default="train")
+    args, overrides = parser.parse_known_args(overrides)
+
+    config_dir: Path = get_project_root() / "configs"
+    config_file = Path(args.config_name)
+    if not config_file.is_file():
+        raise FileNotFoundError(f"Config file {config_file} does not exist.")
+    else:
+        logger.info(f"Using config file: {config_file}")
     with initialize_config_dir(version_base="1.3", config_dir=str(config_dir)):
-        return compose(config_name="train", overrides=overrides)
+        return compose(config_name=config_file.stem, overrides=overrides)
 
 
 def _resolve_output_dir(cfg: DictConfig, overrides: list[str]) -> Path:
