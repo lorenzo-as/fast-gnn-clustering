@@ -10,6 +10,9 @@ qmin: 0.01
 s_B: 0.1
 beta_stabilizing: soft_q_scaling
 beta_term_option: paper
+loss_weights:
+  L_V: 1.0
+  L_beta: 1.0
 
 save_every: 20
 log_components_every: 1

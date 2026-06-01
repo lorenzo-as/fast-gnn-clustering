@@ -185,7 +185,8 @@ def _train_step(
             return_components=True,
         )
         components = cast(dict[str, tf.Tensor], components)
-        loss = components["L_V"] + components["L_beta"]
+        _weight_oc_components(components, train_cfg)
+        loss = components["L_total"]
 
     grads = tape.gradient(loss, model.trainable_variables)
     optimizer.apply_gradients(zip(grads, model.trainable_variables, strict=True))
@@ -232,8 +233,28 @@ def _eval_step(
         return_components=True,
     )
     components = cast(dict[str, tf.Tensor], components)
-    loss = components["L_V"] + components["L_beta"]
+    _weight_oc_components(components, train_cfg)
+    loss = components["L_total"]
     return loss, components
+
+
+def _weight_oc_components(components: dict[str, tf.Tensor], train_cfg: dict) -> None:
+    """Scale OC component dict in place to match the optimized objective."""
+    l_v_weight, l_beta_weight = _oc_loss_weights(train_cfg)
+    for key in ("L_V", "L_V_attractive", "L_V_repulsive"):
+        if key in components:
+            components[key] = l_v_weight * components[key]
+    for key in ("L_beta", "L_beta_noise", "L_beta_sig", "L_beta_norms_term", "L_beta_logbeta_term"):
+        if key in components:
+            components[key] = l_beta_weight * components[key]
+    components["L_total"] = components["L_V"] + components["L_beta"]
+
+
+def _oc_loss_weights(train_cfg: dict) -> tuple[float, float]:
+    weights = train_cfg.get("loss_weights") or {}
+    l_v_weight = weights.get("L_V", 1.0)
+    l_beta_weight = weights.get("L_beta", 1.0)
+    return l_v_weight, l_beta_weight
 
 
 def _mean_components(components_per_batch: list[dict[str, tf.Tensor]]) -> dict[str, float]:

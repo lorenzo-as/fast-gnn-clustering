@@ -499,7 +499,7 @@ def get_clustering_np(
 
 def formatted_loss_components_string(components: dict) -> str:
     """Pretty-print loss component breakdown for training logs."""
-    total = components["L_V"] + components["L_beta"]
+    total = components.get("L_total", components["L_V"] + components["L_beta"])
     total_val = float(total.numpy()) if hasattr(total, "numpy") else float(total)
 
     def fmt(key):
@@ -512,6 +512,9 @@ def formatted_loss_components_string(components: dict) -> str:
         return f"{val:+.4f} ({100.0 * frac:.1f}%)"
 
     lines = [
+        f"  L_total        = {fmt('L_total')}"
+        if "L_total" in components
+        else f"  L_total        = {total_val:+.4f} (100.0%)",
         f"  L_V            = {fmt('L_V')}",
         f"  L_V_attractive = {fmt('L_V_attractive')}",
         f"  L_V_repulsive  = {fmt('L_V_repulsive')}",

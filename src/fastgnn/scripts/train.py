@@ -42,18 +42,17 @@ def main() -> None:
 
 
 def _compose_config(overrides: list[str]) -> DictConfig:
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--config-name", default="train")
-    args, overrides = parser.parse_known_args(overrides)
+    config_dir = get_project_root() / "configs"
+    configs = sorted(p.stem for p in config_dir.glob("*.yaml"))
 
-    config_dir: Path = get_project_root() / "configs"
-    config_file = Path(args.config_name)
-    if not config_file.is_file():
-        raise FileNotFoundError(f"Config file {config_file} does not exist.")
-    else:
-        logger.info(f"Using config file: {config_file}")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="train", choices=configs, help="Config to use.")
+    args, hydra_overrides = parser.parse_known_args(overrides)
+
+    logger.info("Using config file: %s", config_dir / f"{args.config}.yaml")
+
     with initialize_config_dir(version_base="1.3", config_dir=str(config_dir)):
-        return compose(config_name=config_file.stem, overrides=overrides)
+        return compose(config_name=args.config, overrides=hydra_overrides)
 
 
 def _resolve_output_dir(cfg: DictConfig, overrides: list[str]) -> Path:

@@ -27,7 +27,7 @@ from fastgnn.data.cmssw.transforms import (
     preprocess_vertices,
 )
 from fastgnn.training.objectcondensation_loss import calc_LV_Lbeta, get_clustering_np
-from fastgnn.training.trainer import _build_optimizer, _train_step
+from fastgnn.training.trainer import _build_optimizer, _train_step, _weight_oc_components
 
 
 @pytest.fixture
@@ -315,6 +315,35 @@ def test_one_batch_training_step(dataset_dir: Path) -> None:
     assert np.isfinite(float(loss))
     assert "L_V" in components
     assert "L_beta" in components
+    assert "L_total" in components
+    assert float(components["L_total"]) == pytest.approx(
+        float(components["L_V"] + components["L_beta"])
+    )
+    assert float(loss) == pytest.approx(float(components["L_total"]))
+
+
+def test_oc_loss_weights_scale_saved_components() -> None:
+    components = {
+        "L_V": tf.constant(2.0, dtype=tf.float32),
+        "L_V_attractive": tf.constant(0.5, dtype=tf.float32),
+        "L_V_repulsive": tf.constant(1.5, dtype=tf.float32),
+        "L_beta": tf.constant(3.0, dtype=tf.float32),
+        "L_beta_noise": tf.constant(1.0, dtype=tf.float32),
+        "L_beta_sig": tf.constant(2.0, dtype=tf.float32),
+    }
+
+    _weight_oc_components(
+        components,
+        {"loss_weights": {"L_V": 0.5, "L_beta": 2.0}},
+    )
+
+    assert float(components["L_V"]) == pytest.approx(1.0)
+    assert float(components["L_V_attractive"]) == pytest.approx(0.25)
+    assert float(components["L_V_repulsive"]) == pytest.approx(0.75)
+    assert float(components["L_beta"]) == pytest.approx(6.0)
+    assert float(components["L_beta_noise"]) == pytest.approx(2.0)
+    assert float(components["L_beta_sig"]) == pytest.approx(4.0)
+    assert float(components["L_total"]) == pytest.approx(7.0)
 
 
 def test_truth_object_energy_threshold_removes_and_remaps_objects() -> None:
