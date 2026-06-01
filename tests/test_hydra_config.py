@@ -24,6 +24,8 @@ def test_train_config_composes() -> None:
     assert cfg.model.name == "gravnet_v0"
     assert cfg.model.quantized is False
     assert cfg.training.truncate == "energy_desc"
+    assert cfg.training.qmin_reference == 1.0
+    assert cfg.training.qmin_schedule.points[1] == [5, 0.01]
     assert cfg.training.loss_weights.L_V == 1.0
     assert cfg.training.loss_weights.L_beta == 1.0
     assert cfg.model.max_vertices == 1024

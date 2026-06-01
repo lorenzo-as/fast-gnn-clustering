@@ -7,6 +7,14 @@ truncate: energy_desc
 normalize_features: true
 
 qmin: 0.01
+qmin_reference: 1.0
+qmin_schedule:
+  type: piecewise
+  interpolation: constant
+  points:
+    - [0, 0.1]
+    - [5, 0.01]
+    - [10, 1e-4]
 s_B: 0.1
 beta_stabilizing: soft_q_scaling
 beta_term_option: paper

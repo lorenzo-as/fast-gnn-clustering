@@ -21,6 +21,7 @@ from .objectcondensation_loss import (
     formatted_loss_components_string,
 )
 from .oc_outputs import OCOutputLayout, split_oc_outputs
+from .schedules import scheduled_scalar_value
 
 logger = logging.getLogger(__name__)
 
@@ -55,13 +56,22 @@ def train(
     history = {
         "train": [],
         "val": [],
+        "val_reference": [],
         "train_components": [],
         "val_components": [],
+        "qmin": [],
+        "lr": [],
     }
     warned_padding = False
 
     for epoch in range(train_cfg["n_epochs"]):
         t0 = time.time()
+        qmin = scheduled_scalar_value(
+            train_cfg.get("qmin", 1.0),
+            train_cfg.get("qmin_schedule"),
+            epoch,
+        )
+        qmin_reference = float(train_cfg.get("qmin_reference", train_cfg.get("qmin", 1.0)))
 
         # ------------------------------------------------------------------
         # Training pass
@@ -85,7 +95,14 @@ def train(
                     stacklevel=2,
                 )
                 warned_padding = True
-            loss, components = _train_step(model, batch, optimizer, train_cfg, output_layout)
+            loss, components = _train_step(
+                model,
+                batch,
+                optimizer,
+                train_cfg,
+                output_layout,
+                qmin=qmin,
+            )
             train_losses.append(float(loss))
             train_components.append(components)
 
@@ -96,6 +113,7 @@ def train(
         # Validation pass
         # ------------------------------------------------------------------
         val_losses = []
+        val_reference_losses = []
         val_components = []
         for batch in val_dataset.batches(
             max_vertices=model_cfg["max_vertices"],
@@ -106,22 +124,45 @@ def train(
             truncate=train_cfg.get("truncate", "first"),
             normalize_features=train_cfg.get("normalize_features", True),
         ):
-            loss, components = _eval_step(model, batch, train_cfg, output_layout)
+            loss, components = _eval_step(
+                model,
+                batch,
+                train_cfg,
+                output_layout,
+                qmin=qmin,
+            )
             val_losses.append(float(loss))
             val_components.append(components)
+            if qmin_reference == qmin:
+                val_reference_losses.append(float(loss))
+            else:
+                reference_loss, _ = _eval_step(
+                    model,
+                    batch,
+                    train_cfg,
+                    output_layout,
+                    qmin=qmin_reference,
+                )
+                val_reference_losses.append(float(reference_loss))
 
         mean_val_loss = np.mean(val_losses)
+        mean_val_reference_loss = np.mean(val_reference_losses)
         mean_val_components = _mean_components(val_components)
 
         history["train"].append(mean_train_loss)
         history["val"].append(mean_val_loss)
+        history["val_reference"].append(mean_val_reference_loss)
         history["train_components"].append(mean_train_components)
         history["val_components"].append(mean_val_components)
+        history["qmin"].append(qmin)
+        history["lr"].append(_optimizer_learning_rate(optimizer))
 
         elapsed = time.time() - t0
         logger.info(
             f"Epoch {epoch + 1:03d}/{train_cfg['n_epochs']}  "
             f"train={mean_train_loss:.4f}  val={mean_val_loss:.4f}  "
+            f"val_reference={mean_val_reference_loss:.4f}  "
+            f"qmin={qmin:.4g}  lr={history['lr'][-1]:.4g}  "
             f"({elapsed:.1f}s)"
         )
         if train_losses and (epoch + 1) % train_cfg.get("log_components_every", 10) == 0:
@@ -133,10 +174,10 @@ def train(
         # ------------------------------------------------------------------
         # Checkpointing
         # ------------------------------------------------------------------
-        if mean_val_loss < best_val_loss:
-            best_val_loss = mean_val_loss
+        if mean_val_reference_loss < best_val_loss:
+            best_val_loss = mean_val_reference_loss
             model.save(str(output_dir / "best_model.keras"))
-            logger.info("  saved best model (val_loss=%.4f)", best_val_loss)
+            logger.info("  saved best model (val_reference_loss=%.4f)", best_val_loss)
 
         if (epoch + 1) % train_cfg.get("save_every", 10) == 0:
             model.save(str(output_dir / f"checkpoint_epoch{epoch + 1:03d}.keras"))
@@ -154,6 +195,8 @@ def _train_step(
     optimizer: tf.keras.optimizers.Optimizer,
     train_cfg: dict,
     output_layout: OCOutputLayout | None = None,
+    *,
+    qmin: float | None = None,
 ) -> tuple[tf.Tensor, dict]:
     """Single training step with GradientTape."""
     batch_tensors = {k: tf.constant(v) for k, v in batch.items()}
@@ -178,7 +221,7 @@ def _train_step(
             cluster_space_coords=flat["cluster_coords"],
             cluster_index_per_event=tf.cast(flat["hit_object_id"], tf.int32),
             batch=batch_idx,
-            qmin=train_cfg.get("qmin", 1.0),
+            qmin=train_cfg.get("qmin", 1.0) if qmin is None else qmin,
             s_B=train_cfg.get("s_B", 0.1),
             beta_stabilizing=train_cfg.get("beta_stabilizing", "soft_q_scaling"),
             beta_term_option=train_cfg.get("beta_term_option", "paper"),
@@ -198,6 +241,8 @@ def _eval_step(
     batch: dict,
     train_cfg: dict,
     output_layout: OCOutputLayout | None = None,
+    *,
+    qmin: float | None = None,
 ) -> tuple[tf.Tensor, dict]:
     """
     Single validation step (no gradient).
@@ -226,7 +271,7 @@ def _eval_step(
         cluster_space_coords=flat["cluster_coords"],
         cluster_index_per_event=tf.cast(flat["hit_object_id"], tf.int32),
         batch=batch_idx,
-        qmin=train_cfg.get("qmin", 1.0),
+        qmin=train_cfg.get("qmin", 1.0) if qmin is None else qmin,
         s_B=train_cfg.get("s_B", 0.1),
         beta_stabilizing=train_cfg.get("beta_stabilizing", "soft_q_scaling"),
         beta_term_option=train_cfg.get("beta_term_option", "paper"),
@@ -270,7 +315,7 @@ def _mean_components(components_per_batch: list[dict[str, tf.Tensor]]) -> dict[s
 
 
 def _to_float(value: tf.Tensor | float) -> float:
-    return float(value.numpy()) if hasattr(value, "numpy") else float(value)
+    return float(value.numpy()) if isinstance(value, tf.Tensor) else float(value)
 
 
 def _assert_no_padding_labels(hit_object_id: tf.Tensor) -> None:
@@ -282,7 +327,7 @@ def _assert_no_padding_labels(hit_object_id: tf.Tensor) -> None:
 
 
 def _build_optimizer(train_cfg: dict) -> tf.keras.optimizers.Optimizer:
-    lr = train_cfg.get("lr", 1e-3)
+    lr = _build_learning_rate(train_cfg)
     optimizer_name = train_cfg.get("optimizer", "adam").lower()
     optimizer_kwargs = {}
     if train_cfg.get("global_clipnorm") is not None:
@@ -297,3 +342,21 @@ def _build_optimizer(train_cfg: dict) -> tf.keras.optimizers.Optimizer:
             **optimizer_kwargs,
         )
     raise ValueError(f"Unknown optimizer: {optimizer_name}")
+
+
+def _build_learning_rate(
+    train_cfg: dict,
+) -> float | tf.keras.optimizers.schedules.LearningRateSchedule:
+    schedule_cfg = train_cfg.get("lr_schedule")
+    if schedule_cfg is None:
+        return train_cfg.get("lr", 1e-3)
+    return tf.keras.optimizers.schedules.deserialize(
+        {
+            "class_name": schedule_cfg["class_name"],
+            "config": dict(schedule_cfg.get("config", {})),
+        }
+    )
+
+
+def _optimizer_learning_rate(optimizer: tf.keras.optimizers.Optimizer) -> float:
+    return _to_float(optimizer.learning_rate)
