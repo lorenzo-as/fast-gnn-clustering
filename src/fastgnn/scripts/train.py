@@ -47,12 +47,16 @@ def _compose_config(overrides: list[str]) -> DictConfig:
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="train", choices=configs, help="Config to use.")
+    parser.add_argument("--name", default=None, help="Human-readable run name.")
     args, hydra_overrides = parser.parse_known_args(overrides)
 
     logger.info("Using config file: %s", config_dir / f"{args.config}.yaml")
 
     with initialize_config_dir(version_base="1.3", config_dir=str(config_dir)):
-        return compose(config_name=args.config, overrides=hydra_overrides)
+        cfg = compose(config_name=args.config, overrides=hydra_overrides)
+    if args.name is not None:
+        cfg.run_name = args.name
+    return cfg
 
 
 def _resolve_output_dir(cfg: DictConfig, overrides: list[str]) -> Path:

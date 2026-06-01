@@ -4,6 +4,7 @@ from hydra import compose, initialize_config_dir
 
 from fastgnn.scripts.convert_cmssw import convert_from_config
 from fastgnn.scripts.train import (
+    _compose_config,
     _load_datasets,
     _resolve_output_dir,
 )
@@ -26,6 +27,7 @@ def test_train_config_composes() -> None:
     assert cfg.training.loss_weights.L_V == 1.0
     assert cfg.training.loss_weights.L_beta == 1.0
     assert cfg.model.max_vertices == 1024
+    assert cfg.run_name is None
 
 
 def test_quantized_model_config_composes() -> None:
@@ -162,3 +164,10 @@ def test_train_paths_resolve_from_project_root(monkeypatch, tmp_path: Path) -> N
             "max_events": None,
         },
     ]
+
+
+def test_train_cli_name_is_applied_after_config_compose() -> None:
+    cfg = _compose_config(["--config", "train", "--name", "study-a", "seed=7"])
+
+    assert cfg.run_name == "study-a"
+    assert cfg.seed == 7
