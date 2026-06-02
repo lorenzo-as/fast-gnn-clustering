@@ -18,11 +18,16 @@ import uproot
 import yaml
 
 from fastgnn.data.base import compute_normalization, make_splits
+from fastgnn.data.cmssw.hit_features import (
+    DEFAULT_LOG_FLOOR,
+    HitFeatures,
+)
 from fastgnn.data.cmssw.preprocessing import (
-    DERIVED_OBJECT_FIELDS,
     HIT_CLUSTER0,
+    HIT_CLUSTERS,
     HIT_ENERGY,
     HIT_FRAC0,
+    HIT_FRACS,
     HIT_LAYER,
     HIT_NCLUSTERS,
     HIT_PREFIX,
@@ -33,14 +38,15 @@ from fastgnn.data.cmssw.preprocessing import (
     HIT_ZSIDE,
     OBJECT_FIELDS,
     build_truth,
-    get_feature_names,
+    object_aggregation_spec,
+    processed_object_properties_supported,
 )
 from fastgnn.data.cmssw.transforms import preprocess_vertices
-from fastgnn.geometry import xyz_to_eta_phi
 
 logger = logging.getLogger(__name__)
 
-_BRANCHES_TO_LOAD = [
+_PERSISTED_HIT_FEATURES = ("x", "y", "z", "energy", "layer")
+_BASE_BRANCHES_TO_LOAD = [
     HIT_X,
     HIT_Y,
     HIT_Z,
@@ -55,12 +61,20 @@ _BRANCHES_TO_LOAD = [
 ]
 
 
-def iter_cmssw_raw_events(
+def _branches_to_load(cfg: dict[str, Any]) -> list[str]:
+    branches = list(_BASE_BRANCHES_TO_LOAD)
+    slots, _ = object_aggregation_spec(cfg)
+    if len(slots) > 1:
+        branches.extend([*HIT_CLUSTERS[1:], *HIT_FRACS[1:]])
+    return branches
+
+
+def iter_cmssw_events(
     file_paths: list[str | Path],
     cfg: dict[str, Any] | None = None,
     max_events: int | None = None,
-) -> Iterator[dict[str, np.ndarray]]:
-    """Yield filtered CMSSW events as flat NumPy field dictionaries."""
+) -> Iterator[tuple[dict[str, np.ndarray], dict[str, np.ndarray]]]:
+    """Yield raw and preprocessed CMSSW event views after endcap filtering."""
     cfg = cfg or {}
     paths = [Path(path) for path in file_paths]
     zside_req = cfg.get("zside", 1)
@@ -68,7 +82,7 @@ def iter_cmssw_raw_events(
 
     iterator = uproot.iterate(
         [f"{path}:Events" for path in paths],
-        expressions=_BRANCHES_TO_LOAD,
+        expressions=_branches_to_load(cfg),
         library="ak",
         step_size=cfg.get("step_size") or max_events or "100 MB",
     )
@@ -92,7 +106,7 @@ def iter_cmssw_raw_events(
             processed_event = preprocess_vertices(raw_event, cfg)
             if len(processed_event[HIT_X]) == 0:
                 continue
-            yield processed_event
+            yield raw_event, processed_event
             events_loaded += 1
 
 
@@ -100,15 +114,24 @@ def cmssw_event_to_record(
     raw_event: dict[str, np.ndarray],
     event_id: int,
     cfg: dict[str, Any] | None = None,
+    *,
+    processed_event: dict[str, np.ndarray] | None = None,
+    hit_features: list[str] | None = None,
 ) -> ak.Record:
     """Build one canonical event record from one raw CMSSW event."""
     cfg = cfg or {}
-    truth = build_truth(raw_event, cfg)
+    processed_event = preprocess_vertices(raw_event, cfg) if processed_event is None else processed_event #iterate_cmssw_events should have already preprocessed, keep fallback to make this function standalone
+    hit_features = (
+        list(cfg.get("hit_features", HitFeatures.available_features()))
+        if hit_features is None
+        else hit_features
+    )
+    truth = build_truth(raw_event, cfg, processed_event=processed_event)
 
     return ak.Record(
         {
             "event_id": int(event_id),
-            "hits": _build_hits(raw_event, cfg),
+            "hits": _build_hits(processed_event, cfg, hit_features),
             "truth": {
                 "hit_object_id": truth["hit_object_id"].astype(np.int32),
                 "objects": truth["objects"],
@@ -133,9 +156,10 @@ def convert_cmssw_root(
 
     Returns the output directory path.
     """
-    convert_timings = []
-    convert_timings.append([time.time(), "start"])
+    _t = time.time()
     cfg = dict(config or {})
+    hit_features = list(cfg.get("hit_features", HitFeatures.available_features()))
+    stored_hit_features = _persisted_hit_features(hit_features)
     if max_events is None:
         max_events = cfg.get("max_events")
 
@@ -145,38 +169,45 @@ def convert_cmssw_root(
         raise FileExistsError(f"{events_path} already exists. Pass overwrite=True to replace it.")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    convert_timings.append([time.time(), "start_record_loop"])
     records = [
-        cmssw_event_to_record(raw_event, event_id=i, cfg=cfg)
-        for i, raw_event in tqdm(enumerate(iter_cmssw_raw_events(input_files, cfg, max_events)))
+        cmssw_event_to_record(
+            raw_event,
+            event_id=i,
+            cfg=cfg,
+            processed_event=processed_event,
+            hit_features=hit_features,
+        )
+        for i, (raw_event, processed_event) in tqdm(
+            enumerate(iter_cmssw_events(input_files, cfg, max_events))
+        )
     ]
-    convert_timings.append([time.time(), "end_record_loop"])
+    logger.info("Finished converting %d events in %.2f seconds.", len(records), time.time() - _t)
+    _t = time.time()
     if not records:
         raise RuntimeError("No CMSSW events passed filtering. Check input files and zside.")
 
     events = ak.Array(records)
-    convert_timings.append([time.time(), "end_ak_array"])
+    logger.info("Finished creating AkArray in %.2f seconds.", time.time() - _t)
+    _t = time.time()
     ak.to_parquet(events, events_path, compression="snappy")
-    convert_timings.append([time.time(), "end_parquet_write"])
+    logger.info("Finished writing Parquet file in %.2f seconds.", time.time() - _t)
+    _t = time.time()
 
-    feature_names = get_feature_names(cfg)
-    convert_timings.append([time.time(), "end_feature_names"])
     splits = make_splits(len(records), cfg)
-    convert_timings.append([time.time(), "end_make_splits"])
-    normalization = compute_normalization(records, feature_names, splits["train"])
-    convert_timings.append([time.time(), "end_compute_normalization"])
+    normalization = compute_normalization(records, stored_hit_features, splits["train"])
 
     metadata = {
         "format": "fastgnn-canonical-ragged-parquet",
-        "format_version": 2,
+        "format_version": 3,
         "source": "cmssw",
         "n_events": len(records),
         "source_files": [str(Path(path)) for path in input_files],
-        "feature_names": feature_names,
+        "hit_features": stored_hit_features,
+        "log_floor": float(cfg.get("log_floor", DEFAULT_LOG_FLOOR)),
         "required_fields": {
-            "hits": ["x", "y", "z", "energy", "cluster0", "frac0"],
+            "hits": list(records[0]["hits"].fields),
             "truth": ["hit_object_id", "objects"],
-            "truth.objects": list(OBJECT_FIELDS.keys()) + list(DERIVED_OBJECT_FIELDS),
+            "truth.objects": list(records[0]["truth"]["objects"].fields),
         },
         "padding": {
             "hit_object_id": -1,
@@ -184,27 +215,20 @@ def convert_cmssw_root(
             "mask": False,
         },
         "preprocessing": {
-            "mode": cfg.get(
-                "preprocessing", cfg.get("preprocessing_mode", "rechits_energy_threshold")
-            ),
-            "hit_min_energy": cfg.get("hit_min_energy", cfg.get("min_hit_energy")),
-            "truth_min_object_energy": cfg.get(
-                "truth_min_object_energy",
-                cfg.get("truth_object_energy_threshold"),
-            ),
-            "truth_min_visible_energy": cfg.get("truth_min_visible_energy"),
+            "mode": cfg.get("preprocessing", "rechits_energy_threshold"),
+            "hit_min_energy": cfg.get("hit_min_energy"),
+            "truth_min_object_energy": cfg.get("truth_min_object_energy"),
+            "truth_min_sum_energy": cfg.get("truth_min_sum_energy"),
             "truth_object_energy_field": cfg.get("truth_object_energy_field", "impact_energy"),
+            "object_aggregation_mode": cfg.get("object_aggregation_mode", "hard_assigned_full"),
+            "processed_object_properties": processed_object_properties_supported(cfg),
             "filter_truth_by_zside": cfg.get("filter_truth_by_zside", True),
             "thresholded_truth_objects": "hits become hit_object_id=0 OC background/noise",
-            "visible_truth_objects": (
-                "truth.objects.n_hits > 0 after hit preprocessing selections"
-            ),
         },
         "splits": splits["metadata"],
         "config": cfg,
     }
     _write_yaml(output_dir / "metadata.yaml", metadata)
-    convert_timings.append([time.time(), "end_metadata_write"])
     _write_yaml(output_dir / "normalization.yaml", normalization)
     np.savez_compressed(
         output_dir / "splits.npz",
@@ -212,34 +236,45 @@ def convert_cmssw_root(
         val=splits["val"],
         test=splits["test"],
     )
-    convert_timings.append([time.time(), "end_splits_write"])
-    logger.info("CMSSW conversion timings:")
-    for timing in convert_timings:
-        logger.info("  %s: %.2f s", timing[1], timing[0] - convert_timings[0][0])
-
     return output_dir
 
 
-def _build_hits(raw_event: dict[str, np.ndarray], cfg: dict[str, Any]) -> dict[str, np.ndarray]:
-    hits = {
-        "x": raw_event[HIT_X].astype(np.float32),
-        "y": raw_event[HIT_Y].astype(np.float32),
-        "z": raw_event[HIT_Z].astype(np.float32),
-        "energy": raw_event[HIT_ENERGY].astype(np.float32),
-        "layer": raw_event[HIT_LAYER].astype(np.int16),
-        "time": raw_event[HIT_TIME].astype(np.float32),
-        "zside": raw_event[HIT_ZSIDE].astype(np.int8),
-        "n_clusters": raw_event[HIT_NCLUSTERS].astype(np.int16),
-        "cluster0": raw_event[HIT_CLUSTER0].astype(np.int32),
-        "frac0": raw_event[HIT_FRAC0].astype(np.float32),
-    }
-
-    coord_sys = cfg.get("coordinate_system", "cartesian")
-    if coord_sys in {"cylindrical", "both"}:
-        eta, phi = xyz_to_eta_phi(hits["x"], hits["y"], hits["z"])
-        hits["eta"] = eta.astype(np.float32)
-        hits["phi"] = phi.astype(np.float32)
+def _build_hits(
+    raw_event: dict[str, np.ndarray],
+    cfg: dict[str, Any],
+    hit_features: list[str],
+) -> dict[str, np.ndarray]:
+    hits = HitFeatures(
+        {
+            "x": raw_event[HIT_X],
+            "y": raw_event[HIT_Y],
+            "z": raw_event[HIT_Z],
+            "energy": raw_event[HIT_ENERGY],
+            "layer": raw_event[HIT_LAYER],
+        },
+        log_floor=float(cfg.get("log_floor", DEFAULT_LOG_FLOOR)),
+    ).build(_persisted_hit_features(hit_features))
+    hits.update(
+        {
+            "time": raw_event[HIT_TIME].astype(np.float32),
+            "zside": raw_event[HIT_ZSIDE].astype(np.int8),
+            "n_clusters": raw_event[HIT_NCLUSTERS].astype(np.int16),
+            "cluster0": raw_event[HIT_CLUSTER0].astype(np.int32),
+            "frac0": raw_event[HIT_FRAC0].astype(np.float32),
+        }
+    )
+    slots, _ = object_aggregation_spec(cfg)
+    if len(slots) > 1:
+        for slot in slots[1:]:
+            hits[f"cluster{slot}"] = raw_event[HIT_CLUSTERS[slot]].astype(np.int32)
+            hits[f"frac{slot}"] = raw_event[HIT_FRACS[slot]].astype(np.float32)
     return hits
+
+
+def _persisted_hit_features(hit_features: list[str]) -> list[str]:
+    """Retain physical hit fields needed by diagnostics and object properties."""
+    persisted = {*_PERSISTED_HIT_FEATURES, *hit_features}
+    return [name for name in HitFeatures.available_features() if name in persisted]
 
 
 def _write_yaml(path: Path, data: dict[str, Any]) -> None:

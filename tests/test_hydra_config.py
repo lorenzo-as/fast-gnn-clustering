@@ -55,11 +55,27 @@ def test_cmssw_conversion_config_composes() -> None:
     assert cfg.max_events is None
     assert cfg.overwrite is False
     assert cfg.zside == 1
-    assert cfg.coordinate_system == "cartesian"
+    assert cfg.hit_features == [
+        "x",
+        "y",
+        "z",
+        "r",
+        "eta",
+        "phi",
+        "energy",
+        "et",
+        "layer",
+        "x_over_z",
+        "y_over_z",
+        "log_energy",
+        "log_et",
+    ]
+    assert cfg.log_floor == 1.0e-8
     assert cfg.preprocessing == "rechits_energy_threshold"
     assert cfg.hit_min_energy == 0.2
+    assert cfg.object_aggregation_mode == "hard_assigned_full"
     assert cfg.truth_min_object_energy is None
-    assert cfg.truth_min_visible_energy == 1
+    assert cfg.truth_min_sum_energy == 1
     assert cfg.truth_object_energy_field == "impact_energy"
     assert cfg.filter_truth_by_zside is True
     assert cfg.step_size is None
@@ -88,10 +104,12 @@ def test_cmssw_conversion_cli_passes_config(monkeypatch) -> None:
             "max_events=100",
             "overwrite=true",
             "zside=-1",
-            "coordinate_system=both",
+            "hit_features=[x,y,z,energy]",
+            "log_floor=1e-6",
             "hit_min_energy=0.5",
+            "object_aggregation_mode=hard_assigned_fractional",
             "truth_min_object_energy=2.0",
-            "truth_min_visible_energy=1.5",
+            "truth_min_sum_energy=1.5",
             "filter_truth_by_zside=false",
             "step_size=10 MB",
             "train_frac=0.7",
@@ -110,11 +128,13 @@ def test_cmssw_conversion_cli_passes_config(monkeypatch) -> None:
             "output_dir": project_root / "data/processed/cmssw/v0/example",
             "config": {
                 "zside": -1,
-                "coordinate_system": "both",
+                "hit_features": ["x", "y", "z", "energy"],
+                "log_floor": 1.0e-6,
                 "preprocessing": "rechits_energy_threshold",
                 "hit_min_energy": 0.5,
+                "object_aggregation_mode": "hard_assigned_fractional",
                 "truth_min_object_energy": 2.0,
-                "truth_min_visible_energy": 1.5,
+                "truth_min_sum_energy": 1.5,
                 "truth_object_energy_field": "impact_energy",
                 "filter_truth_by_zside": False,
                 "step_size": "10 MB",

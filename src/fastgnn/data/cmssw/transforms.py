@@ -11,7 +11,7 @@ from fastgnn.data.cmssw.preprocessing import HIT_ENERGY, HIT_PREFIX
 
 def preprocess_vertices(raw_event: dict[str, np.ndarray], cfg: dict[str, Any]) -> dict[str, np.ndarray]:
     """Dispatch configured CMSSW vertex preprocessing for one raw event."""
-    mode = str(cfg.get("preprocessing", cfg.get("preprocessing_mode", "rechits_energy_threshold")))
+    mode = str(cfg.get("preprocessing", "rechits_energy_threshold"))
     try:
         preprocess = PREPROCESSING_REGISTRY[mode]
     except KeyError as exc:
@@ -25,7 +25,7 @@ def preprocess_rechits_energy_threshold(
     cfg: dict[str, Any],
 ) -> dict[str, np.ndarray]:
     """Threshold raw RecHits by energy while keeping hit-shaped branches aligned."""
-    min_energy = cfg.get("hit_min_energy", cfg.get("min_hit_energy"))
+    min_energy = cfg.get("hit_min_energy")
     if min_energy is None:
         return raw_event
 
@@ -41,6 +41,7 @@ def preprocess_rechits_energy_threshold(
 
 
 def preprocess_econ_t_threshold(
+        # * This should use E_T and correctly quantized inputs once available
     raw_event: dict[str, np.ndarray],
     cfg: dict[str, Any],
 ) -> dict[str, np.ndarray]:

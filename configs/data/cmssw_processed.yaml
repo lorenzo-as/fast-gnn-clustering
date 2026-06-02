@@ -4,5 +4,14 @@ feature_names:
   - x
   - y
   - z
+  - r
+  - eta
+  - phi
   - energy
+  - et
+  - layer
+  - x_over_z
+  - y_over_z
+  - log_energy
+  - log_et
 max_events: null

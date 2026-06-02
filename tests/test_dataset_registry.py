@@ -17,7 +17,7 @@ def test_registry_scans_yaml_into_table(tmp_path: Path) -> None:
             "preprocessing": {
                 "hit_min_energy": 0.2,
                 "truth_min_object_energy": 1,
-                "truth_min_visible_energy": 1,
+                "truth_min_sum_energy": 1,
             },
         },
     )
@@ -28,12 +28,12 @@ def test_registry_scans_yaml_into_table(tmp_path: Path) -> None:
     assert table.height == 1
     assert row["relative_path"] == "v1/ds_a"
     assert row["n_events"] == 10000
-    assert row["feature_names"] is None
+    assert row["hit_features"] is None
     assert row["train_frac"] is None
     assert row["val_frac"] is None
     assert row["preprocessing.hit_min_energy"] == 0.2
     assert row["preprocessing.truth_min_object_energy"] == 1
-    assert row["preprocessing.truth_min_visible_energy"] == 1
+    assert row["preprocessing.truth_min_sum_energy"] == 1
     assert "path" not in table.columns
     assert "label" not in table.columns
 

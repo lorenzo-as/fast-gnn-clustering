@@ -7,11 +7,14 @@ max_events: null
 overwrite: false
 
 zside: 1
-coordinate_system: cartesian
+hit_features: [x, y, z, r, eta, phi, energy, et, layer, x_over_z, y_over_z, log_energy, log_et]
+log_floor: 1.0e-8
 preprocessing: rechits_energy_threshold
 hit_min_energy: 0.2
+# Controls rechit links for always-stored raw and supported processed truth object properties.
+object_aggregation_mode: hard_assigned_full
 truth_min_object_energy: 1
-truth_min_visible_energy: 1
+truth_min_sum_energy: 1
 truth_object_energy_field: impact_energy
 filter_truth_by_zside: true
 step_size: null

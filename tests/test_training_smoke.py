@@ -243,6 +243,40 @@ def test_dataset_as_padded_and_batches(dataset_dir: Path) -> None:
     np.testing.assert_array_equal(batch["hit_object_id"], padded["hit_object_id"])
 
 
+def test_normalization_projects_requested_feature_subset(dataset_dir: Path) -> None:
+    dataset = CaloDataset(dataset_dir, split="train")
+
+    padded = dataset.as_padded(
+        max_vertices=4,
+        feature_names=["energy", "x"],
+        normalize_features=True,
+    )
+
+    np.testing.assert_allclose(
+        padded["features"][0], [[1.0, 0.0], [2.0, 1.0], [0.5, 2.0], [3.0, 3.0]]
+    )
+
+
+def test_energy_desc_truncation_uses_stored_energy_outside_model_inputs(dataset_dir: Path) -> None:
+    dataset = CaloDataset(dataset_dir, split="train")
+
+    padded = dataset.as_padded(
+        max_vertices=2,
+        feature_names=["x"],
+        truncate="energy_desc",
+        normalize_features=False,
+    )
+
+    np.testing.assert_array_equal(padded["features"][0, :, 0], [3.0, 1.0])
+
+
+def test_dataset_rejects_requested_feature_missing_from_parquet(dataset_dir: Path) -> None:
+    dataset = CaloDataset(dataset_dir, split="train")
+
+    with pytest.raises(KeyError, match="missing from"):
+        dataset.as_padded(max_vertices=4, feature_names=["eta"])
+
+
 def test_oc_loss_handles_trailing_events_with_no_signal_hits() -> None:
     beta = tf.fill((9,), 0.1)
     coords = tf.zeros((9, 2), dtype=tf.float32)
@@ -365,11 +399,10 @@ def test_truth_object_energy_threshold_removes_and_remaps_objects() -> None:
     np.testing.assert_array_equal(truth["hit_object_id"], [0, 0, 1, 0])
     np.testing.assert_array_equal(truth["objects"]["impact_energy"], [3.0])
     np.testing.assert_array_equal(truth["objects"]["n_hits"], [1])
-    np.testing.assert_allclose(truth["objects"]["visible_energy"], [1.0])
-    np.testing.assert_array_equal(truth["objects"]["is_visible"], [True])
+    np.testing.assert_allclose(truth["objects"]["sum_energy"], [1.0])
 
 
-def test_truth_objects_record_visibility_without_removing_invisible_objects() -> None:
+def test_truth_objects_record_processed_properties_without_removing_empty_objects() -> None:
     raw_event = _raw_cmssw_event(
         hit_energy=np.array([1.5, 2.0, 0.5], dtype=np.float32),
         cluster0=np.array([0, 2, -1], dtype=np.int32),
@@ -381,11 +414,10 @@ def test_truth_objects_record_visibility_without_removing_invisible_objects() ->
 
     np.testing.assert_array_equal(truth["hit_object_id"], [1, 3, 0])
     np.testing.assert_array_equal(truth["objects"]["n_hits"], [1, 0, 1])
-    np.testing.assert_allclose(truth["objects"]["visible_energy"], [1.5, 0.0, 2.0])
-    np.testing.assert_array_equal(truth["objects"]["is_visible"], [True, False, True])
+    np.testing.assert_allclose(truth["objects"]["sum_energy"], [1.5, 0.0, 2.0])
 
 
-def test_truth_visible_energy_threshold_removes_and_remaps_objects() -> None:
+def test_truth_sum_energy_threshold_removes_and_remaps_objects() -> None:
     raw_event = _raw_cmssw_event(
         hit_energy=np.array([0.4, 1.0, 1.2, 0.7], dtype=np.float32),
         cluster0=np.array([0, 1, 1, 2], dtype=np.int32),
@@ -393,16 +425,15 @@ def test_truth_visible_energy_threshold_removes_and_remaps_objects() -> None:
         object_energy=np.array([10.0, 20.0, 30.0], dtype=np.float32),
     )
 
-    truth = build_truth(raw_event, {"truth_min_visible_energy": 1.5})
+    truth = build_truth(raw_event, {"truth_min_sum_energy": 1.5})
 
     np.testing.assert_array_equal(truth["hit_object_id"], [0, 1, 1, 0])
     np.testing.assert_array_equal(truth["objects"]["impact_energy"], [20.0])
     np.testing.assert_array_equal(truth["objects"]["n_hits"], [2])
-    np.testing.assert_allclose(truth["objects"]["visible_energy"], [2.2])
-    np.testing.assert_array_equal(truth["objects"]["is_visible"], [True])
+    np.testing.assert_allclose(truth["objects"]["sum_energy"], [2.2])
 
 
-def test_truth_visible_energy_threshold_default_preserves_visibility_only() -> None:
+def test_truth_sum_energy_threshold_default_preserves_all_objects() -> None:
     raw_event = _raw_cmssw_event(
         hit_energy=np.array([0.4, 1.0, 1.2, 0.7], dtype=np.float32),
         cluster0=np.array([0, 1, 1, 2], dtype=np.int32),
@@ -410,13 +441,12 @@ def test_truth_visible_energy_threshold_default_preserves_visibility_only() -> N
         object_energy=np.array([10.0, 20.0, 30.0], dtype=np.float32),
     )
 
-    truth = build_truth(raw_event, {"truth_min_visible_energy": None})
+    truth = build_truth(raw_event, {"truth_min_sum_energy": None})
 
     np.testing.assert_array_equal(truth["hit_object_id"], [1, 2, 2, 3])
     np.testing.assert_array_equal(truth["objects"]["impact_energy"], [10.0, 20.0, 30.0])
     np.testing.assert_array_equal(truth["objects"]["n_hits"], [1, 2, 1])
-    np.testing.assert_allclose(truth["objects"]["visible_energy"], [0.4, 2.2, 0.7])
-    np.testing.assert_array_equal(truth["objects"]["is_visible"], [True, True, True])
+    np.testing.assert_allclose(truth["objects"]["sum_energy"], [0.4, 2.2, 0.7])
 
 
 def test_truth_objects_default_to_configured_zside() -> None:

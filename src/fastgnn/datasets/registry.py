@@ -42,7 +42,7 @@ def _row(dataset_dir: Path, root: Path) -> dict[str, Any]:
     return {
         "relative_path": str(dataset_dir.relative_to(root)),
         "n_events": metadata.get("n_events"),
-        "feature_names": metadata.get("feature_names"),
+        "hit_features": metadata.get("hit_features"),
         "truth_objects": (metadata.get("required_fields") or {}).get("truth.objects"),
         "train_frac": splits.get("train_frac"),
         "val_frac": splits.get("val_frac"),

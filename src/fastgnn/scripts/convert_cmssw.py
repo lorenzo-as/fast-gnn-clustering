@@ -10,8 +10,11 @@ from typing import Any
 
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
+import yaml
 
 from fastgnn.utils import get_project_root, resolve_project_path
+
+logger = logging.getLogger(__name__)
 
 _CONTROL_KEYS = {"input_files", "output_dir", "max_events", "overwrite"}
 
@@ -21,6 +24,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     cfg = _compose_config(sys.argv[1:])
     convert_from_config(cfg)
+    logger.info("Finished CMSSW conversion.")
 
 
 def _compose_config(overrides: list[str]) -> DictConfig:
@@ -36,6 +40,9 @@ def convert_from_config(cfg: DictConfig) -> Path:
     input_files = [resolve_project_path(path) for path in cfg.input_files]
     output_dir = resolve_project_path(cfg.output_dir)
     conversion_config = _conversion_config(cfg)
+
+    logger.info("Starting CMSSW conversion of %d ROOT files.", len(input_files))
+    logger.debug("Input files: %s\nConfig: %s", input_files, yaml.safe_dump(conversion_config))
 
     return convert_cmssw_root(
         input_files=input_files,
