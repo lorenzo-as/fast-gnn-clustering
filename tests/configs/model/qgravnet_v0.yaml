@@ -1,7 +1,6 @@
 name: qgravnet_v0
 quantized: true
 max_vertices: 512
-feature_names: [x, y, z, energy]
 
 n_blocks: 2
 n_neighbours: 8

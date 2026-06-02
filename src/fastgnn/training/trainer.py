@@ -48,6 +48,7 @@ def train(
 
     train_cfg = cfg["training"]
     model_cfg = cfg["model"]
+    feature_names = cfg["data"]["feature_names"]
     output_layout = OCOutputLayout.from_config(model_cfg)
 
     optimizer = _build_optimizer(train_cfg)
@@ -81,7 +82,7 @@ def train(
         for batch in train_dataset.batches(
             max_vertices=model_cfg["max_vertices"],
             batch_size=train_cfg["batch_size"],
-            feature_names=model_cfg["feature_names"],
+            feature_names=feature_names,
             shuffle=True,
             seed=cfg.get("seed", 42) + epoch,
             truncate=train_cfg.get("truncate", "first"),
@@ -118,7 +119,7 @@ def train(
         for batch in val_dataset.batches(
             max_vertices=model_cfg["max_vertices"],
             batch_size=train_cfg["batch_size"],
-            feature_names=model_cfg["feature_names"],
+            feature_names=feature_names,
             shuffle=False,
             seed=0,
             truncate=train_cfg.get("truncate", "first"),

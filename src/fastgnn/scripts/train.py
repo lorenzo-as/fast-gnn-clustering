@@ -13,6 +13,7 @@ from typing import Any
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
 
+from fastgnn.data import CaloDataset
 from fastgnn.utils import get_project_root, resolve_project_path
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ def main() -> None:
 
     train_ds, val_ds = _load_datasets(cfg)
     model = _build_gravnet_model(cfg, n_features=len(cfg.data.feature_names))
+    _validate_training_contract(model, train_ds, val_ds, cfg)
 
     from fastgnn.training.trainer import train
 
@@ -154,6 +156,30 @@ def _build_gravnet_model(cfg: DictConfig, n_features: int):
         n_vertices=int(model_cfg.max_vertices),
         n_features=n_features,
     )
+
+
+def _validate_training_contract(
+    model, train_dataset: CaloDataset, val_dataset: CaloDataset, cfg: DictConfig
+) -> None:
+    """Fail before training when configured model inputs and dataset fields disagree."""
+    feature_names = list(cfg.data.feature_names)
+    normalize = bool(cfg.training.get("normalize_features", True))
+    for split, dataset in (("train", train_dataset), ("val", val_dataset)):
+        try:
+            dataset.validate_feature_names(feature_names, normalize=normalize)
+        except (KeyError, ValueError) as exc:
+            raise ValueError(f"{split} dataset feature validation failed: {exc}") from exc
+
+    input_shape = model.input_shape
+    if isinstance(input_shape, list):
+        if len(input_shape) != 1:
+            raise ValueError(f"Expected one model input, got input shapes {input_shape}")
+        input_shape = input_shape[0]
+    if not input_shape or input_shape[-1] != len(feature_names):
+        raise ValueError(
+            "Model input feature dimension does not match cfg.data.feature_names: "
+            f"model.input_shape={input_shape}, configured features={feature_names}"
+        )
 
 
 def _optional_container(value: Any) -> dict[str, Any] | None:
