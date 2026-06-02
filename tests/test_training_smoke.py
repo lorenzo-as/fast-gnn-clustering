@@ -6,8 +6,8 @@ import pytest
 import tensorflow as tf
 import yaml
 
-from fastgnn.data import CaloDataset, PadCollator
-from fastgnn.data.base import compute_normalization
+from fastgnn.data import CaloDataset
+from fastgnn.data.base import PadCollator, compute_normalization
 from fastgnn.data.cmssw.preprocessing import (
     CLUSTER_PREFIX,
     HIT_CLUSTER0,
@@ -53,8 +53,8 @@ def dataset_dir(tmp_path: Path) -> Path:
         yaml.safe_dump(
             {
                 "format": "fastgnn-canonical-ragged-parquet",
-                "format_version": 2,
-                "feature_names": ["x", "y", "z", "energy"],
+                "format_version": 3,
+                "hit_features": ["x", "y", "z", "energy"],
             },
             sort_keys=False,
         ),
@@ -63,9 +63,10 @@ def dataset_dir(tmp_path: Path) -> Path:
     (tmp_path / "normalization.yaml").write_text(
         yaml.safe_dump(
             {
-                "feature_names": ["x", "y", "z", "energy"],
-                "mean": [0.0, 0.0, 100.0, 0.0],
-                "std": [1.0, 1.0, 1.0, 1.0],
+                "x": {"mean": 0.0, "std": 1.0},
+                "y": {"mean": 0.0, "std": 1.0},
+                "z": {"mean": 100.0, "std": 1.0},
+                "energy": {"mean": 0.0, "std": 1.0},
             },
             sort_keys=False,
         ),
@@ -123,7 +124,7 @@ def test_cmssw_processed_dataset_loads(dataset_dir: Path) -> None:
 
     assert len(train_ds) == 1
     assert len(val_ds) == 1
-    assert train_ds.feature_names == ["x", "y", "z", "energy"]
+    assert train_ds.hit_features == ["x", "y", "z", "energy"]
     assert len(train_ds.events) == 1
     event = train_ds[0]
     assert event.truth.hit_object_id.tolist() == [1, 1, 0, 2]
@@ -151,7 +152,12 @@ def test_compute_normalization_accepts_awkward_records() -> None:
         np.array([0], dtype=np.int64),
     )
 
-    assert normalization["mean"] == [0.5, 0.0, 100.0, 3.0]
+    assert normalization == {
+        "x": {"mean": 0.5, "std": 0.5},
+        "y": {"mean": 0.0, "std": 1.0},
+        "z": {"mean": 100.0, "std": 1.0},
+        "energy": {"mean": 3.0, "std": 1.0},
+    }
 
 
 def test_get_clustering_np_skips_already_assigned_seeds() -> None:
@@ -170,7 +176,7 @@ def test_get_clustering_np_skips_already_assigned_seeds() -> None:
     assert clustering.tolist() == [0, 0, 2]
 
 
-def test_feature_names_are_required(tmp_path: Path) -> None:
+def test_hit_features_are_required(tmp_path: Path) -> None:
     records = [
         _event_record(
             0,
@@ -181,10 +187,10 @@ def test_feature_names_are_required(tmp_path: Path) -> None:
         )
     ]
     ak.to_parquet(ak.Array(records), tmp_path / "events.parquet")
-    (tmp_path / "metadata.yaml").write_text("format_version: 2\n", encoding="utf-8")
+    (tmp_path / "metadata.yaml").write_text("format_version: 3\n", encoding="utf-8")
 
-    with pytest.raises(KeyError, match="feature_names"):
-        _ = CaloDataset(tmp_path).feature_names
+    with pytest.raises(KeyError, match="hit_features"):
+        _ = CaloDataset(tmp_path).hit_features
 
 
 def test_random_truncation_preserves_alignment() -> None:

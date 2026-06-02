@@ -20,9 +20,10 @@ only when building fixed-shape training batches:
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Literal
+from typing import Any, Literal
 
 import awkward as ak
 import numpy as np
@@ -60,7 +61,7 @@ def _to_numpy(value: Any) -> np.ndarray:
         return np.asarray(ak.to_list(value))
 
 
-def _field_group_from_record(record: Any) -> "FieldGroup":
+def _field_group_from_record(record: Any) -> FieldGroup:
     """Recursively convert an Awkward record into nested FieldGroup objects."""
     data = {}
     for name in record.fields:
@@ -123,9 +124,9 @@ class EventRecord:
     @property
     def n_hits(self) -> int:
         if "x" in self.hits:
-            return int(len(self.hits.x))
+            return len(self.hits.x)
         if self.hits.fields:
-            return int(len(self.hits[self.hits.fields[0]]))
+            return len(self.hits[self.hits.fields[0]])
         return 0
 
     @property
@@ -133,7 +134,7 @@ class EventRecord:
         self.truth.require("objects")
         objects = self.truth.objects
         if objects.fields:
-            return int(len(objects[objects.fields[0]]))
+            return len(objects[objects.fields[0]])
         return 0
 
     def features(self, names: Iterable[str]) -> np.ndarray:
@@ -143,10 +144,13 @@ class EventRecord:
 
     def training_dict(self, feature_names: Iterable[str]) -> dict[str, np.ndarray]:
         self.truth.require("hit_object_id")
-        return {
+        out = {
             "features": self.features(feature_names),
             "hit_object_id": self.truth.hit_object_id.astype(np.int32),
         }
+        if "energy" in self.hits:
+            out["_hit_energy"] = self.hits.energy.astype(np.float32)
+        return out
 
     def object_index_for_hit(self, hit_index: int) -> int | None:
         """Return the 0-based truth-object index for a hit, or None for noise."""
@@ -230,14 +234,14 @@ class CaloDataset:
         }
 
     @property
-    def feature_names(self) -> list[str]:
+    def hit_features(self) -> list[str]:
         try:
-            feature_names = self.metadata["feature_names"]
+            hit_features = self.metadata["hit_features"]
         except KeyError as exc:
             raise KeyError(
-                f"{self.dataset_dir / 'metadata.yaml'} must define feature_names"
+                f"{self.dataset_dir / 'metadata.yaml'} must define hit_features"
             ) from exc
-        return list(feature_names)
+        return list(hit_features)
 
     def __len__(self) -> int:
         return len(self._events)
@@ -249,7 +253,7 @@ class CaloDataset:
             f"events={len(self)}, "
             f"split={split!r}, "
             f"path={str(self.events_path)!r}, "
-            f"features={self.feature_names!r}"
+            f"hit_features={self.hit_features!r}"
             ")"
         )
 
@@ -265,7 +269,7 @@ class CaloDataset:
             else FieldGroup({}),
         )
 
-    def split(self, split: Split, max_events: int | None = None) -> "CaloDataset":
+    def split(self, split: Split, max_events: int | None = None) -> CaloDataset:
         return CaloDataset(self.dataset_dir, split=split, max_events=max_events)
 
     def batches(
@@ -279,7 +283,8 @@ class CaloDataset:
         normalize_features: bool = True,
     ) -> Iterator[dict[str, np.ndarray]]:
         """Yield padded mini-batches for training or evaluation loops."""
-        feature_names = list(feature_names) if feature_names is not None else self.feature_names
+        feature_names = list(feature_names) if feature_names is not None else self.hit_features
+        self.validate_feature_names(feature_names, normalize=normalize_features)
         collator = PadCollator(
             max_vertices=max_vertices,
             feature_names=feature_names,
@@ -306,7 +311,8 @@ class CaloDataset:
         """Return this whole dataset padded for model.predict or notebook analysis."""
         if len(self) == 0:
             raise ValueError("Cannot build padded data from an empty dataset")
-        feature_names = list(feature_names) if feature_names is not None else self.feature_names
+        feature_names = list(feature_names) if feature_names is not None else self.hit_features
+        self.validate_feature_names(feature_names, normalize=normalize_features)
         collator = PadCollator(
             max_vertices=max_vertices,
             feature_names=feature_names,
@@ -317,7 +323,7 @@ class CaloDataset:
         return collator([self[i] for i in range(len(self))])
 
     def summary(self) -> dict[str, Any]:
-        n_hits = np.asarray(ak.num(self._events.hits.x), dtype=np.int64)
+        n_hits = np.asarray(ak.num(self._events.truth.hit_object_id), dtype=np.int64)
         hit_object_ids = self._events.truth.hit_object_id
         n_objects = np.asarray(
             [
@@ -345,7 +351,7 @@ class CaloDataset:
         return {
             "n_events": len(self),
             "split": self.split_name,
-            "feature_names": self.feature_names,
+            "hit_features": self.hit_features,
             "fields": self.fields,
             "hits_per_event": stats(n_hits),
             "objects_per_event": stats(n_objects),
@@ -354,6 +360,18 @@ class CaloDataset:
                 "std": float(np.std(noise_fraction)) if len(noise_fraction) else 0.0,
             },
         }
+
+    def validate_feature_names(self, feature_names: Iterable[str], *, normalize: bool) -> None:
+        """Validate requested model inputs against stored hit and normalization fields."""
+        feature_names = list(feature_names)
+        missing = sorted(set(feature_names) - set(self.fields["hits"]))
+        if missing:
+            raise KeyError(
+                f"Requested feature(s) missing from {self.events_path}: {', '.join(missing)}. "
+                f"Available hit fields: {', '.join(self.fields['hits'])}"
+            )
+        if normalize:
+            _normalization_arrays(feature_names, self.normalization)
 
 
 class PadCollator:
@@ -399,10 +417,10 @@ class PadCollator:
 
         for key in BATCH_KEYS:
             arrays = []
-            for event, order in zip(training_events, orders):
+            for event, order in zip(training_events, orders, strict=True):
                 arr = event[key][order]
                 if key == "features" and self.normalization is not None:
-                    arr = _normalize_features(
+                    arr = apply_normalization(
                         arr,
                         self.feature_names,
                         self.normalization,
@@ -423,7 +441,7 @@ class PadCollator:
                     pad_value = self.label_pad_value
                 else:
                     pad_value = self.pad_value
-                pad_shape = (self.max_vertices - n_hits,) + arr.shape[1:]
+                pad_shape = (self.max_vertices - n_hits, *arr.shape[1:])
                 pad = np.full(pad_shape, pad_value, dtype=arr.dtype)
                 arrays.append(np.concatenate([arr, pad], axis=0))
                 if key == "features":
@@ -444,15 +462,15 @@ class PadCollator:
             return self._rng.permutation(n_hits)
         if self.truncate != "energy_desc":
             return np.arange(n_hits)
-        try:
-            energy_col = self.feature_names.index("energy")
-        except ValueError:
+        if "_hit_energy" in event:
+            energy = event["_hit_energy"]
+        elif "energy" in self.feature_names:
+            energy = event["features"][:, self.feature_names.index("energy")]
+        else:
             raise ValueError(
-                "truncate='energy_desc' requires 'energy' to be in feature_names. "
-                f"Current feature_names: {self.feature_names}. "
-                "Otherwise select truncate='first' or truncate='random'."
+                "truncate='energy_desc' requires stored hits.energy"
             )
-        return np.argsort(-event["features"][:, energy_col])
+        return np.argsort(-energy)
 
 
 def make_splits(n_events: int, cfg: dict[str, Any]) -> dict[str, Any]:
@@ -485,6 +503,19 @@ def make_splits(n_events: int, cfg: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _compact_hit_object_ids(hit_object_id: np.ndarray) -> np.ndarray:
+    """Compact positive IDs while preserving -1 padding and 0 real-noise."""
+    hit_object_id = np.asarray(hit_object_id, dtype=np.int32)
+    positive = np.unique(hit_object_id[hit_object_id > NOISE_OBJECT_ID])
+    if len(positive) == 0:
+        return hit_object_id
+
+    compact = np.full_like(hit_object_id, PADDING_OBJECT_ID, dtype=np.int32)
+    compact[hit_object_id == NOISE_OBJECT_ID] = NOISE_OBJECT_ID
+    for new_id, old_id in enumerate(positive, start=1):
+        compact[hit_object_id == old_id] = new_id
+    return compact
+
 def compute_normalization(
     records: list[dict[str, Any]],
     feature_names: list[str],
@@ -504,41 +535,37 @@ def compute_normalization(
     std = flat.std(axis=0)
     std = np.where(std < 1e-8, 1.0, std)
     return {
-        "feature_names": feature_names,
-        "mean": mean.astype(float).tolist(),
-        "std": std.astype(float).tolist(),
+        name: {"mean": float(mean[index]), "std": float(std[index])}
+        for index, name in enumerate(feature_names)
     }
 
 
-def _compact_hit_object_ids(hit_object_id: np.ndarray) -> np.ndarray:
-    """Compact positive IDs while preserving -1 padding and 0 real-noise."""
-    hit_object_id = np.asarray(hit_object_id, dtype=np.int32)
-    positive = np.unique(hit_object_id[hit_object_id > NOISE_OBJECT_ID])
-    if len(positive) == 0:
-        return hit_object_id
-
-    compact = np.full_like(hit_object_id, PADDING_OBJECT_ID, dtype=np.int32)
-    compact[hit_object_id == NOISE_OBJECT_ID] = NOISE_OBJECT_ID
-    for new_id, old_id in enumerate(positive, start=1):
-        compact[hit_object_id == old_id] = new_id
-    return compact
-
-
-def _normalize_features(
+def apply_normalization(
     features: np.ndarray,
     feature_names: list[str],
     normalization: dict[str, Any],
 ) -> np.ndarray:
     """Validate feature names and apply z-score normalization."""
-    norm_feature_names = list(normalization.get("feature_names", []))
-    if norm_feature_names != feature_names:
-        raise ValueError(
-            "Normalization feature names do not match collator feature names: "
-            f"{norm_feature_names} != {feature_names}"
-        )
-    mean = np.asarray(normalization["mean"], dtype=np.float32)
-    std = np.asarray(normalization["std"], dtype=np.float32)
+    mean, std = _normalization_arrays(feature_names, normalization)
     return ((features.astype(np.float32) - mean) / std).astype(np.float32)
+
+
+def _normalization_arrays(
+    feature_names: list[str],
+    normalization: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Returns mean and std arrays for the requested feature names in the requested order."""
+    missing = [name for name in feature_names if name not in normalization]
+    if missing:
+        raise ValueError(
+            "Normalization is missing requested feature(s): "
+            f"{', '.join(missing)}. Available: {', '.join(normalization)}"
+        )
+    stats = [normalization[name] for name in feature_names]
+    return (
+        np.asarray([item["mean"] for item in stats], dtype=np.float32),
+        np.asarray([item["std"] for item in stats], dtype=np.float32),
+    )
 
 
 def _batch_generator(
