@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Literal
 
 import numpy as np
@@ -36,6 +37,7 @@ _GREEK = [
     ("pi", "π"),
 ]
 _SUP = str.maketrans("0+-*", "⁰⁺⁻*")
+EventView = Literal["xy", "yz", "3d"]
 
 
 def _to_pretty(name: str) -> str:
@@ -88,11 +90,12 @@ def _cluster_color(hit_object_id: int) -> str:
 def plot_event(
     event: EventRecord,
     color_by: Literal["energy", "hit_object_id"] = "energy",
-    view: Literal["2d", "3d", "both"] = "both",
+    view: EventView | Sequence[EventView] | None = None,
+    views: Sequence[EventView] | None = None,
     show_cluster_markers: bool = True,
     energy_threshold: float = 0.0,
     show_clusters_below_threshold: bool = True,
-    width: int = 1000,
+    width: int | None = None,
     height: int = 580,
 ) -> tuple[go.Figure, str]:
     """
@@ -118,6 +121,7 @@ def plot_event(
         c_pdg=event.truth.objects.track_pdg_id,
         mode=mode,
         view=view,
+        views=views,
         show_cluster_markers=show_cluster_markers,
         energy_threshold=energy_threshold,
         show_clusters_below_threshold=show_clusters_below_threshold,
@@ -138,12 +142,13 @@ def plot_event_display(
     c_e: np.ndarray,
     c_pdg: np.ndarray,
     mode: str = "energy",
-    view: Literal["2d", "3d", "both"] = "both",
+    view: EventView | Sequence[EventView] | None = None,
+    views: Sequence[EventView] | None = None,
     show_cluster_markers: bool = True,
     energy_threshold: float = 0.0,
     show_clusters_below_threshold: bool = True,
     event_idx: int | None = None,
-    width: int = 1000,
+    width: int | None = None,
     height: int = 580,
 ) -> tuple[go.Figure, str]:
     """
@@ -152,7 +157,7 @@ def plot_event_display(
     Primary function: plot_event_display()
         - Colors hits by log(energy)  [mode="energy"]
         - Colors hits by SimCluster assignment  [mode="truth"]
-        - Both modes can show XY, 3D, or both views
+        - Both modes can show any combination of XY, YZ, and 3D views
 
     Usage:
         from fastgnn.data.cmssw.plotting import plot_event_display
@@ -176,8 +181,7 @@ def plot_event_display(
     """
     if mode not in ("energy", "truth"):
         raise ValueError(f"mode must be 'energy' or 'truth', got '{mode}'")
-    if view not in ("2d", "3d", "both"):
-        raise ValueError(f"view must be '2d', '3d', or 'both', got '{view}'")
+    selected_views = _normalize_views(view=view, views=views)
 
     # Project impact (eta, phi) to x, y at z=318.5 cm (HGCAL face)
     from fastgnn.geometry import etaphi_to_xy_at_z
@@ -189,37 +193,26 @@ def plot_event_display(
     mask_below = ~mask_above
 
     # Build figure
-    if view == "both":
-        fig = make_subplots(
-            rows=1,
-            cols=2,
-            column_widths=[0.5, 0.5],
-            specs=[[{"type": "xy"}, {"type": "scene"}]],
-            subplot_titles=[f"XY Plane (z≈{HGCAL_Z:.1f} cm)", "3D View"],
-        )
-    elif view == "2d":
-        fig = make_subplots(
-            rows=1,
-            cols=1,
-            specs=[[{"type": "xy"}]],
-            subplot_titles=[f"XY Plane (z≈{HGCAL_Z:.1f} cm)"],
-        )
-    else:
-        fig = make_subplots(
-            rows=1,
-            cols=1,
-            specs=[[{"type": "scene"}]],
-            subplot_titles=["3D View"],
-        )
+    fig = make_subplots(
+        rows=1,
+        cols=len(selected_views),
+        column_widths=[1] * len(selected_views),
+        specs=[[_view_subplot_spec(v) for v in selected_views]],
+        subplot_titles=[_view_title(v) for v in selected_views],
+        horizontal_spacing=0.04 if len(selected_views) > 1 else 0.0,
+    )
+    figure_width = width if width is not None else _default_figure_width(selected_views)
 
     if mode == "energy":
-        _add_energy_traces(fig, h_x, h_y, h_z, h_e, view=view)
+        _add_energy_traces(fig, h_x, h_y, h_z, h_e, views=selected_views)
     else:
         # hit_object_id is 1-indexed into c_names/c_e (0 = noise)
         object_labels = {0: "Noise"}
         for i, (name, energy) in enumerate(zip(c_names, c_e)):
             object_labels[i + 1] = f"{name} {energy:.2f} GeV"
-        _add_truth_traces(fig, h_x, h_y, h_z, h_e, hit_object_id, object_labels, view=view)
+        _add_truth_traces(
+            fig, h_x, h_y, h_z, h_e, hit_object_id, object_labels, views=selected_views
+        )
 
     # SimCluster impact points
     if show_cluster_markers:
@@ -232,7 +225,7 @@ def plot_event_display(
             [n for n, m in zip(c_names, mask_above) if m],
             color="red",
             label="Clusters",
-            which=view,
+            views=selected_views,
         )
     if show_clusters_below_threshold and mask_below.any():
         _add_cluster_markers(
@@ -244,11 +237,12 @@ def plot_event_display(
             [n for n, m in zip(c_names, mask_below) if m],
             color="grey",
             label="Clusters (below threshold)",
-            which=view,
+            views=selected_views,
         )
 
     # Annotations on XY view
-    if view in ("2d", "both") and show_cluster_markers and mask_above.any():
+    if "xy" in selected_views and show_cluster_markers and mask_above.any():
+        xy_col = _view_col(selected_views, "xy")
         offsets = [(12, 12), (-12, 12), (12, -12), (-12, -12)]
         cx_above = c_x[mask_above]
         cy_above = c_y[mask_above]
@@ -260,8 +254,6 @@ def plot_event_display(
                 y=y_,
                 ax=ax,
                 ay=ay,
-                xref="x",
-                yref="y",
                 axref="pixel",
                 ayref="pixel",
                 text=name,
@@ -271,13 +263,15 @@ def plot_event_display(
                 bordercolor="black",
                 borderwidth=1,
                 font=dict(size=10),
+                row=1,
+                col=xy_col,
             )
 
     title = f"Event {event_idx} | " if event_idx is not None else ""
     title += f"Mode: {mode} | {len(h_x)} hits ({int((hit_object_id > 0).sum())} signal, {int((hit_object_id == 0).sum())} noise) | {np.sum(mask_above)} clusters above {energy_threshold} GeV"
     fig.update_layout(
         title=title,
-        width=width,
+        width=figure_width,
         height=height,
         template="plotly_white",
         legend=dict(
@@ -288,28 +282,44 @@ def plot_event_display(
             yanchor="top",
         ),
     )
-    if view in ("2d", "both"):
-        fig.update_xaxes(title_text="x [cm]", row=1, col=1)
+    if "xy" in selected_views:
+        xy_col = _view_col(selected_views, "xy")
+        fig.update_xaxes(title_text="x [cm]", row=1, col=xy_col)
         fig.update_yaxes(
             title_text="y [cm]",
-            scaleanchor="x",
+            scaleanchor=_axis_ref(selected_views, "xy", "x"),
             scaleratio=1,
+            constrain="domain",
             row=1,
-            col=1,
+            col=xy_col,
         )
-    if view in ("3d", "both"):
+    if "yz" in selected_views:
+        yz_col = _view_col(selected_views, "yz")
+        fig.update_xaxes(title_text="y [cm]", row=1, col=yz_col)
+        fig.update_yaxes(
+            title_text="z [cm]",
+            scaleanchor=_axis_ref(selected_views, "yz", "x"),
+            scaleratio=1,
+            constrain="domain",
+            row=1,
+            col=yz_col,
+        )
+    if "3d" in selected_views:
+        scene_name = _scene_layout_name(selected_views, "3d")
         fig.update_layout(
-            scene=dict(
-                xaxis_title="x [cm]",
-                yaxis_title="y [cm]",
-                zaxis_title="z [cm]",
-                aspectmode="data",
-                zaxis=dict(autorange="reversed"),
-            ),
-            scene_camera=dict(
-                eye=dict(x=0, y=0, z=2.5),
-                up=dict(x=0, y=1, z=0),
-            ),
+            **{
+                scene_name: dict(
+                    xaxis_title="x [cm]",
+                    yaxis_title="y [cm]",
+                    zaxis_title="z [cm]",
+                    aspectmode="data",
+                    zaxis=dict(autorange="reversed"),
+                    camera=dict(
+                        eye=dict(x=0, y=0, z=2.5),
+                        up=dict(x=0, y=1, z=0),
+                    ),
+                )
+            }
         )
 
     # Particle summary markdown
@@ -327,13 +337,73 @@ def plot_event_display(
     return fig, summary
 
 
+def _normalize_views(
+    view: EventView | Sequence[EventView] | None = None,
+    views: Sequence[EventView] | None = None,
+) -> tuple[EventView, ...]:
+    if views is not None and view is not None:
+        raise ValueError("Pass either 'views' or legacy 'view', not both")
+
+    raw_views = views if views is not None else view
+    if raw_views is None:
+        raw_views = ("xy", "3d")
+    elif isinstance(raw_views, str):
+        legacy = {"2d": ("xy",), "both": ("xy", "3d")}
+        raw_views = legacy.get(raw_views, tuple(v.strip() for v in raw_views.split(",")))
+
+    selected: list[EventView] = []
+    valid = {"xy", "yz", "3d"}
+    for raw_view in raw_views:
+        if raw_view not in valid:
+            raise ValueError(
+                "views must contain only 'xy', 'yz', and/or '3d' "
+                f"(legacy view accepts '2d', '3d', or 'both'), got {raw_view!r}"
+            )
+        if raw_view not in selected:
+            selected.append(raw_view)
+
+    if not selected:
+        raise ValueError("At least one event display view must be selected")
+    return tuple(selected)
+
+
+def _view_subplot_spec(view: EventView) -> dict[str, str]:
+    return {"type": "scene"} if view == "3d" else {"type": "xy"}
+
+
+def _default_figure_width(views: Sequence[EventView]) -> int:
+    return max(650, 500 * len(views))
+
+
+def _view_title(view: EventView) -> str:
+    if view == "xy":
+        return f"XY Plane (z≈{HGCAL_Z:.1f} cm)"
+    if view == "yz":
+        return "YZ Plane"
+    return "3D View"
+
+
+def _view_col(views: Sequence[EventView], view: EventView) -> int:
+    return views.index(view) + 1
+
+
+def _scene_layout_name(views: Sequence[EventView], view: EventView) -> str:
+    scene_number = sum(v == "3d" for v in views[: views.index(view) + 1])
+    return "scene" if scene_number == 1 else f"scene{scene_number}"
+
+
+def _axis_ref(views: Sequence[EventView], view: EventView, axis: Literal["x", "y"]) -> str:
+    axis_number = sum(v in ("xy", "yz") for v in views[: views.index(view) + 1])
+    return axis if axis_number == 1 else f"{axis}{axis_number}"
+
+
 def _add_energy_traces(
     fig: go.Figure,
     h_x,
     h_y,
     h_z,
     h_e,
-    view: Literal["2d", "3d", "both"] = "both",
+    views: Sequence[EventView],
 ) -> None:
     """Add hit traces coloured by log10(energy)."""
     log_e = np.log10(np.clip(h_e, 1e-6, None))
@@ -375,7 +445,7 @@ def _add_energy_traces(
         "x=%{x:.2f}<br>y=%{y:.2f}<br>z=%{z:.2f}<br>E=%{marker.color:.4f} GeV<extra>RecHit</extra>"
     )
 
-    if view in ("2d", "both"):
+    if "xy" in views:
         fig.add_trace(
             go.Scatter(
                 x=h_x,
@@ -387,10 +457,26 @@ def _add_energy_traces(
                 hovertemplate=hover,
             ),
             row=1,
-            col=1,
+            col=_view_col(views, "xy"),
         )
 
-    if view in ("3d", "both"):
+    if "yz" in views:
+        fig.add_trace(
+            go.Scatter(
+                x=h_y,
+                y=h_z,
+                mode="markers",
+                marker=marker_2d,
+                name="RecHits",
+                legendgroup="rechits",
+                showlegend="xy" not in views,
+                hovertemplate="y=%{x:.2f}<br>z=%{y:.2f}<br>E=%{marker.color:.4f} GeV<extra>RecHit</extra>",
+            ),
+            row=1,
+            col=_view_col(views, "yz"),
+        )
+
+    if "3d" in views:
         fig.add_trace(
             go.Scatter3d(
                 x=h_x,
@@ -400,11 +486,11 @@ def _add_energy_traces(
                 marker=marker_3d,
                 name="RecHits",
                 legendgroup="rechits",
-                showlegend=(view == "3d"),
+                showlegend=("xy" not in views and "yz" not in views),
                 hovertemplate=hover3d,
             ),
             row=1,
-            col=2 if view == "both" else 1,
+            col=_view_col(views, "3d"),
         )
 
 
@@ -416,7 +502,7 @@ def _add_truth_traces(
     h_e,
     hit_object_id: np.ndarray,
     object_labels: dict[int, str],
-    view: Literal["2d", "3d", "both"] = "both",
+    views: Sequence[EventView],
 ) -> None:
     """
     Add hit traces coloured by SimCluster assignment (hit_object_id).
@@ -442,7 +528,7 @@ def _add_truth_traces(
             f"E=%{{customdata:.4f}} GeV<extra>{label}</extra>"
         )
 
-        if view in ("2d", "both"):
+        if "xy" in views:
             fig.add_trace(
                 go.Scatter(
                     x=h_x[mask],
@@ -456,10 +542,27 @@ def _add_truth_traces(
                     hovertemplate=hover,
                 ),
                 row=1,
-                col=1,
+                col=_view_col(views, "xy"),
             )
 
-        if view in ("3d", "both"):
+        if "yz" in views:
+            fig.add_trace(
+                go.Scatter(
+                    x=h_y[mask],
+                    y=h_z[mask],
+                    mode="markers",
+                    marker=dict(size=size_2d, color=color, opacity=opacity),
+                    name=label,
+                    legendgroup=label,
+                    showlegend="xy" not in views,
+                    customdata=h_e[mask],
+                    hovertemplate=f"y=%{{x:.2f}}<br>z=%{{y:.2f}}<br>E=%{{customdata:.4f}} GeV<extra>{label}</extra>",
+                ),
+                row=1,
+                col=_view_col(views, "yz"),
+            )
+
+        if "3d" in views:
             fig.add_trace(
                 go.Scatter3d(
                     x=h_x[mask],
@@ -469,12 +572,12 @@ def _add_truth_traces(
                     marker=dict(size=size_3d, color=color, opacity=opacity),
                     name=label,
                     legendgroup=label,
-                    showlegend=(view == "3d"),
+                    showlegend=("xy" not in views and "yz" not in views),
                     customdata=h_e[mask],
                     hovertemplate=hover3d,
                 ),
                 row=1,
-                col=2 if view == "both" else 1,
+                col=_view_col(views, "3d"),
             )
 
 
@@ -487,7 +590,7 @@ def _add_cluster_markers(
     c_names,
     color: str,
     label: str,
-    which: Literal["2d", "3d", "both"] = "both",
+    views: Sequence[EventView],
 ) -> None:
     """Add SimCluster impact point markers to XY and 3D views."""
     if len(c_x) == 0:
@@ -502,7 +605,7 @@ def _add_cluster_markers(
         "E=%{customdata:.3f} GeV<extra>Cluster</extra>"
     )
 
-    if which in ("2d", "both"):
+    if "xy" in views:
         fig.add_trace(
             go.Scatter(
                 x=c_x,
@@ -516,9 +619,29 @@ def _add_cluster_markers(
                 hovertemplate=hover,
             ),
             row=1,
-            col=1,
+            col=_view_col(views, "xy"),
         )
-    if which in ("3d", "both"):
+    if "yz" in views:
+        fig.add_trace(
+            go.Scatter(
+                x=c_y,
+                y=c_z,
+                mode="markers",
+                text=c_names,
+                marker=dict(size=14, color=color, line=dict(color="black", width=1)),
+                name=label,
+                legendgroup=label,
+                showlegend="xy" not in views,
+                customdata=c_e,
+                hovertemplate=(
+                    "<b>%{text}</b><br>y=%{x:.2f}<br>z=%{y:.2f}<br>"
+                    "E=%{customdata:.3f} GeV<extra>Cluster</extra>"
+                ),
+            ),
+            row=1,
+            col=_view_col(views, "yz"),
+        )
+    if "3d" in views:
         fig.add_trace(
             go.Scatter3d(
                 x=c_x,
@@ -529,10 +652,10 @@ def _add_cluster_markers(
                 marker=dict(size=6, color=color, line=dict(color="black", width=1)),
                 name=label,
                 legendgroup=label,
-                showlegend=(which == "3d"),
+                showlegend=("xy" not in views and "yz" not in views),
                 customdata=c_e,
                 hovertemplate=hover3d,
             ),
             row=1,
-            col=2 if which == "both" else 1,
+            col=_view_col(views, "3d"),
         )

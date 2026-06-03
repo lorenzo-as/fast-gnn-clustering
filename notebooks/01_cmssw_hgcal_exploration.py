@@ -225,9 +225,8 @@ def _(NBINS, ak, cluster_energy_threshold_selector, data, mplhep, np, plt):
     if len(_thresholds) == 0:
         _thresholds = np.array([0.0])
 
-    _mask_visible = data.truth.objects.is_visible
     _mask_has_hits = data.truth.objects.n_hits > 0
-    _base_mask = _mask_visible & _mask_has_hits
+    _base_mask = _mask_has_hits
 
     _colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
@@ -325,7 +324,7 @@ def _(NBINS, ak, cluster_energy_threshold_selector, data, mplhep, np, plt):
     # distribution of object impact energy, pT, eta, phi (if available in the dataset)
     if all(
         field in data.truth.objects.fields
-        for field in ["impact_energy", "impact_pt", "impact_eta", "impact_phi", "is_visible"]
+        for field in ["impact_energy", "impact_pt", "impact_eta", "impact_phi", "n_hits"]
     ):
         _ax = _axs[2]
         _edges = _linear_edges(
@@ -457,9 +456,8 @@ def _(
     else:
         _threshold_min, _threshold_max = 0.0, 20.0
 
-    _mask_visible = data.truth.objects.is_visible
     _mask_has_hits = data.truth.objects.n_hits > 0
-    _base_mask = _mask_visible & _mask_has_hits
+    _base_mask = _mask_has_hits
 
     _cluster_energy = ak.to_numpy(ak.flatten(data.truth.objects.impact_energy[_base_mask]))
     _cluster_energy = _cluster_energy[np.isfinite(_cluster_energy)]
@@ -572,10 +570,10 @@ def _(ds, mo):
         value="energy",
         label="Hit colour mode",
     )
-    event_display_view = mo.ui.radio(
-        options={"2D": "2d", "3D": "3d", "Both": "both"},
-        value="Both",
-        label="Event display view",
+    event_display_view = mo.ui.multiselect(
+        options={"XY": "xy", "YZ": "yz", "3D": "3d"},
+        value=["xy", "yz", "3d"],
+        label="Event display views",
     )
     show_cluster_markers = mo.ui.checkbox(value=True, label="Show SimCluster markers")
     threshold_input = mo.ui.number(
@@ -625,7 +623,7 @@ def _(
     fig, summary = plot_event(
         event,
         color_by=color_mode.value,
-        view=event_display_view.value,
+        views=event_display_view.value,
         show_cluster_markers=show_cluster_markers.value,
         energy_threshold=float(threshold_input.value or 0.0),
         show_clusters_below_threshold=show_below.value,
@@ -663,7 +661,7 @@ def _(ds, mo):
 
     | Metric | Value |
     |---|---|
-    | Features | {", ".join(stats["feature_names"])} |
+    | Features | {", ".join(stats["hit_features"])} |
     | Hit fields | {", ".join(stats["fields"]["hits"])} |
     | Truth fields | {", ".join(stats["fields"]["truth"])} |
     | Object fields | {", ".join(stats["fields"]["truth.objects"])} |

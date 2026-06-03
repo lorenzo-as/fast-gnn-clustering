@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.23.6"
+__generated_with = "0.23.5"
 app = marimo.App()
 
 
@@ -14,7 +14,8 @@ def _():
     import polars as pl
 
     from fastgnn import get_project_root
-    from fastgnn.data import CaloDataset, PadCollator
+    from fastgnn.data import CaloDataset
+    from fastgnn.data.base import PadCollator
     from fastgnn.datasets import DatasetRegistry
 
     mplhep.style.use("CMS")
@@ -40,7 +41,7 @@ def _(mo):
     ## Select Baseline Dataset
 
     Select one zero-threshold processed dataset. The notebook replays the hit,
-    cluster, visible-energy, normalization, and padding/truncation steps from
+    cluster, sum-energy, normalization, and padding/truncation steps from
     this single baseline.
     """)
     return
@@ -75,12 +76,12 @@ def _(DatasetRegistry, PROCESSED_DIR, mo):
         start=0.0,
         step=0.5,
     )
-    use_visible_energy_threshold = mo.ui.checkbox(
-        label="Apply visible-energy threshold",
+    use_sum_energy_threshold = mo.ui.checkbox(
+        label="Apply sum-energy threshold",
         value=False,
     )
-    visible_min_energy_input = mo.ui.number(
-        label="Visible-energy threshold [GeV]",
+    sum_energy_min_input = mo.ui.number(
+        label="Sum-energy threshold [GeV]",
         value=1.0,
         start=0.0,
         step=0.5,
@@ -92,7 +93,7 @@ def _(DatasetRegistry, PROCESSED_DIR, mo):
             max_load_events,
             dataset_selector,
             mo.hstack([hit_min_energy_input, truth_min_energy_input]),
-            mo.hstack([use_visible_energy_threshold, visible_min_energy_input]),
+            mo.hstack([use_sum_energy_threshold, sum_energy_min_input]),
             make_plots_button,
         ]
     )
@@ -101,9 +102,9 @@ def _(DatasetRegistry, PROCESSED_DIR, mo):
         hit_min_energy_input,
         make_plots_button,
         max_load_events,
+        sum_energy_min_input,
         truth_min_energy_input,
-        use_visible_energy_threshold,
-        visible_min_energy_input,
+        use_sum_energy_threshold,
     )
 
 
@@ -116,9 +117,9 @@ def _(
     make_plots_button,
     max_load_events,
     mo,
+    sum_energy_min_input,
     truth_min_energy_input,
-    use_visible_energy_threshold,
-    visible_min_energy_input,
+    use_sum_energy_threshold,
 ):
     mo.stop(
         not make_plots_button.value,
@@ -135,7 +136,7 @@ def _(
 
     _hit_min_metadata = _preprocessing.get("hit_min_energy")
     _truth_min_metadata = _preprocessing.get("truth_min_object_energy")
-    _visible_min_metadata = _preprocessing.get("truth_min_visible_energy")
+    _sum_energy_min_metadata = _preprocessing.get("truth_min_sum_energy")
     mo.stop(
         _hit_min_metadata not in (None, 0, 0.0),
         mo.md("Baseline dataset must have no hit-energy threshold."),
@@ -145,12 +146,12 @@ def _(
         mo.md("Baseline dataset must have `truth_min_object_energy` unset or 0."),
     )
     mo.stop(
-        _visible_min_metadata not in (None, 0, 0.0),
-        mo.md("Baseline dataset must have no visible-energy threshold."),
+        _sum_energy_min_metadata not in (None, 0, 0.0),
+        mo.md("Baseline dataset must have no sum-energy threshold."),
     )
 
     _required_hit_fields = {"x", "y", "z", "energy", "cluster0", "n_clusters"}
-    _required_object_fields = {"impact_energy", "n_hits", "visible_energy", "is_visible"}
+    _required_object_fields = {"impact_energy", "n_hits", "sum_energy"}
     mo.stop(
         not _required_hit_fields.issubset(ds.fields["hits"]),
         mo.md(
@@ -168,23 +169,21 @@ def _(
     thresholds = {
         "hit_min_energy": float(hit_min_energy_input.value or 0.0),
         "truth_min_object_energy": float(truth_min_energy_input.value or 0.0),
-        "truth_min_visible_energy": (
-            float(visible_min_energy_input.value or 0.0)
-            if use_visible_energy_threshold.value
-            else None
+        "truth_min_sum_energy": (
+            float(sum_energy_min_input.value or 0.0) if use_sum_energy_threshold.value else None
         ),
     }
 
-    visible_threshold_text = (
+    sum_energy_threshold_text = (
         "disabled"
-        if thresholds["truth_min_visible_energy"] is None
-        else f">= **{thresholds['truth_min_visible_energy']:.3g} GeV**"
+        if thresholds["truth_min_sum_energy"] is None
+        else f">= **{thresholds['truth_min_sum_energy']:.3g} GeV**"
     )
     mo.md(
         f"Loaded **{len(ds)} events** from `{selected_record['relative_path']}`.\n\n"
         f"Replayed thresholds: hit >= **{thresholds['hit_min_energy']:.3g} GeV**, "
         f"cluster impact energy >= **{thresholds['truth_min_object_energy']:.3g} GeV**, "
-        f"visible energy {visible_threshold_text}."
+        f"sum energy {sum_energy_threshold_text}."
     )
     return data, ds, selected_record, thresholds
 
@@ -313,34 +312,24 @@ def _(mplhep, np):
 
 @app.cell(hide_code=True)
 def _(PadCollator, ak, data, ds, np, thresholds):
+    from fastgnn.data.object_properties import compute_object_properties
+    from fastgnn.data.cmssw.preprocessing import compact_hit_object_ids
+
     def _field_dict(group):
         return {name: np.asarray(ak.to_numpy(group[name])) for name in group.fields}
 
-    def _objects_with_visibility(objects, hit_object_id, hit_energy):
+    def _objects_with_properties(objects, hits, hit_object_id):
         out = {name: np.asarray(values).copy() for name, values in objects.items()}
         n_objects = len(next(iter(out.values()))) if out else 0
-        n_hits = np.zeros(n_objects, dtype=np.int32)
-        visible_energy = np.zeros(n_objects, dtype=np.float32)
-        positive = hit_object_id > 0
-        if n_objects and np.any(positive):
-            object_indices = hit_object_id[positive] - 1
-            valid = (object_indices >= 0) & (object_indices < n_objects)
-            np.add.at(n_hits, object_indices[valid], 1)
-            np.add.at(visible_energy, object_indices[valid], hit_energy[positive][valid])
-        out["n_hits"] = n_hits
-        out["visible_energy"] = visible_energy
-        out["is_visible"] = n_hits > 0
+        out.update(
+            compute_object_properties(
+                hits,
+                hit_object_id,
+                object_ids=np.arange(1, n_objects + 1),
+                properties=("sum_energy", "n_hits"),
+            )
+        )
         return out
-
-    def _compact_labels(hit_object_id, keep_objects):
-        keep_objects = np.asarray(keep_objects, dtype=bool)
-        old_to_new = np.zeros(len(keep_objects) + 1, dtype=np.int32)
-        kept_indices = np.flatnonzero(keep_objects)
-        old_to_new[kept_indices + 1] = np.arange(1, len(kept_indices) + 1, dtype=np.int32)
-        valid = (hit_object_id >= 0) & (hit_object_id < len(old_to_new))
-        compact = np.zeros_like(hit_object_id, dtype=np.int32)
-        compact[valid] = old_to_new[hit_object_id[valid]]
-        return compact, kept_indices
 
     def _copy_event(event):
         return {
@@ -355,7 +344,7 @@ def _(PadCollator, ak, data, ds, np, thresholds):
         hit_object_id = np.asarray(ak.to_numpy(row["truth"]["hit_object_id"]), dtype=np.int32)
         hits = _field_dict(row["hits"])
         objects = _field_dict(row["truth"]["objects"])
-        objects = _objects_with_visibility(objects, hit_object_id, hits["energy"])
+        objects = _objects_with_properties(objects, hits, hit_object_id)
         baseline_events.append(
             {
                 "event_id": int(row["event_id"]),
@@ -373,7 +362,7 @@ def _(PadCollator, ak, data, ds, np, thresholds):
             name: values[keep_hits] if len(values) == len(keep_hits) else values.copy()
             for name, values in event["hits"].items()
         }
-        objects = _objects_with_visibility(event["objects"], hit_object_id, hits["energy"])
+        objects = _objects_with_properties(event["objects"], hits, hit_object_id)
         hit_filtered_events.append(
             {
                 "event_id": event["event_id"],
@@ -390,8 +379,8 @@ def _(PadCollator, ak, data, ds, np, thresholds):
         _objects = _event["objects"]
         n_objects = len(_objects["impact_energy"])
         keep_objects = _objects["impact_energy"] >= thresholds["truth_min_object_energy"]
-        if thresholds["truth_min_visible_energy"] is not None:
-            keep_objects &= _objects["visible_energy"] >= thresholds["truth_min_visible_energy"]
+        if thresholds["truth_min_sum_energy"] is not None:
+            keep_objects &= _objects["sum_energy"] >= thresholds["truth_min_sum_energy"]
 
         hit_object_id = _event["hit_object_id"]
         _positive = hit_object_id > 0
@@ -403,9 +392,9 @@ def _(PadCollator, ak, data, ds, np, thresholds):
         orphan_counts.append(int(np.sum(orphan_mask)))
         orphan_energies.extend(_event["hits"]["energy"][orphan_mask].tolist())
 
-        compact, kept_indices = _compact_labels(hit_object_id, keep_objects)
+        compact, kept_indices = compact_hit_object_ids(hit_object_id, keep_objects)
         kept_objects = {name: values[kept_indices] for name, values in _objects.items()}
-        kept_objects = _objects_with_visibility(kept_objects, compact, _event["hits"]["energy"])
+        kept_objects = _objects_with_properties(kept_objects, _event["hits"], compact)
         truth_filtered_events.append(
             {
                 "event_id": _event["event_id"],
@@ -416,7 +405,7 @@ def _(PadCollator, ak, data, ds, np, thresholds):
         )
 
     def training_dicts(events, feature_names=None):
-        feature_names = list(feature_names or ds.feature_names)
+        feature_names = list(feature_names or ds.hit_features)
         out = []
         for event in events:
             out.append(
@@ -442,9 +431,8 @@ def _(PadCollator, ak, data, ds, np, thresholds):
         std = flat.std(axis=0)
         std = np.where(std < 1e-8, 1.0, std)
         return {
-            "feature_names": ds.feature_names,
-            "mean": mean.astype(float).tolist(),
-            "std": std.astype(float).tolist(),
+            name: {"mean": float(mean[index]), "std": float(std[index])}
+            for index, name in enumerate(ds.hit_features)
         }
 
     stage_normalization = compute_stage_normalization(truth_filtered_events)
@@ -453,7 +441,7 @@ def _(PadCollator, ak, data, ds, np, thresholds):
         normalization = stage_normalization if normalize_features else None
         collator = PadCollator(
             max_vertices=max_vertices,
-            feature_names=ds.feature_names,
+            feature_names=ds.hit_features,
             truncate=truncate,
             seed=seed,
             normalization=normalization,
@@ -478,7 +466,7 @@ def _(PadCollator, ak, data, ds, np, thresholds):
 
 @app.cell(hide_code=True)
 def _(mo, selected_record, thresholds):
-    _visible = thresholds["truth_min_visible_energy"]
+    _visible = thresholds["truth_min_sum_energy"]
     mo.md(
         f"""
         ## Replayed Configuration
@@ -488,7 +476,7 @@ def _(mo, selected_record, thresholds):
         | Baseline dataset | `{selected_record["relative_path"]}` |
         | Hit energy threshold | {thresholds["hit_min_energy"]:.3g} GeV |
         | Cluster impact-energy threshold | {thresholds["truth_min_object_energy"]:.3g} GeV |
-        | Visible-energy threshold | {"disabled" if _visible is None else f"{_visible:.3g} GeV"} |
+        | Sum-energy threshold | {"disabled" if _visible is None else f"{_visible:.3g} GeV"} |
         """
     )
     return
@@ -647,7 +635,7 @@ def _(
 
     _cluster_energy = np.concatenate(
         [
-            _event["objects"]["impact_energy"][_event["objects"]["is_visible"].astype(bool)]
+            _event["objects"]["impact_energy"][_event["objects"]["n_hits"] > 0]
             for _event in stage["hit_filtered"]
             if len(_event["objects"]["impact_energy"])
         ]
@@ -810,7 +798,7 @@ def _(
         _n_hits = []
         for _event in stage["hit_filtered"]:
             _objects = _event["objects"]
-            keep = (_objects["impact_energy"] > _threshold) & _objects["is_visible"]
+            keep = (_objects["impact_energy"] > _threshold) & (_objects["n_hits"] > 0)
             _n_objects.append(int(np.sum(keep)))
             kept_labels, _ = compact_hit_labels_for_plot(_event["hit_object_id"], keep)
             _positive = kept_labels[kept_labels > 0]
@@ -899,15 +887,21 @@ def _(
     style_hist_axis,
     training_dicts,
 ):
-    _feature_names = ds.feature_names
+    _feature_names = ds.hit_features
     _n_features = len(_feature_names)
     _fig, _axs = plt.subplots(_n_features, 2, figsize=(11, 3.4 * _n_features), squeeze=False)
 
     _raw_values_by_feature = {name: [] for name in _feature_names}
     _norm_values_by_feature = {name: [] for name in _feature_names}
     _split_payloads = []
-    _mean = np.asarray(stage_normalization["mean"], dtype=np.float32)
-    _std = np.asarray(stage_normalization["std"], dtype=np.float32)
+    _mean = np.asarray(
+        [stage_normalization[name]["mean"] for name in _feature_names],
+        dtype=np.float32,
+    )
+    _std = np.asarray(
+        [stage_normalization[name]["std"] for name in _feature_names],
+        dtype=np.float32,
+    )
     for _split_name in SPLIT_NAMES:
         _events = split_events(stage["truth_filtered"], _split_name)
         if not _events:

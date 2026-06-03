@@ -1,8 +1,5 @@
-from fastgnn.data.base import CaloDataset, EventRecord, FieldGroup, PadCollator
+from fastgnn.data.base import CaloDataset
 
 __all__ = [
     "CaloDataset",
-    "EventRecord",
-    "FieldGroup",
-    "PadCollator",
 ]
