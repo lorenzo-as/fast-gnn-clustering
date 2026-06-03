@@ -159,7 +159,6 @@ def calc_LV_Lbeta(
     cluster_index_per_event: tf.Tensor,  # (n_hits,)   truth hit->cluster index (0=noise)
     batch: tf.Tensor,  # (n_hits,)   event index per hit
     qmin: float = 1.0,
-    s_B: float = 0.1,
     noise_cluster_index: int = 0,
     beta_stabilizing: str = "soft_q_scaling",
     huberize_norm_for_V_attractive: bool = True,
@@ -178,7 +177,6 @@ def calc_LV_Lbeta(
         cluster_index_per_event:   truth cluster index, 0 = noise
         batch:                     event index for each hit
         qmin:                      minimum charge (stability)
-        s_B:                       noise beta penalty weight
         noise_cluster_index:       cluster index value meaning noise (must be 0)
         beta_stabilizing:          "paper" | "clip" | "soft_q_scaling"
         huberize_norm_for_V_attractive: use Huber norm in attractive potential
@@ -353,7 +351,7 @@ def calc_LV_Lbeta(
     batch_noise = tf.boolean_mask(batch, is_noise)
     n_noise_per_event = tf.cast(scatter_count(batch_noise, batch_size), tf.float32)
     beta_noise_sum = scatter_sum(beta_noise, batch_noise, batch_size)
-    L_beta_noise = s_B * tf.reduce_sum(safe_divide(beta_noise_sum, n_noise_per_event))
+    L_beta_noise = tf.reduce_sum(safe_divide(beta_noise_sum, n_noise_per_event))
 
     # ------------------------------------------------------------------
     # L_beta signal term

@@ -344,9 +344,14 @@ def test_one_batch_training_step(dataset_dir: Path) -> None:
         "lr": 1.0e-3,
         "global_clipnorm": 1.0,
         "qmin": 1.0,
-        "s_B": 0.1,
         "beta_stabilizing": "soft_q_scaling",
         "beta_term_option": "paper",
+        "loss_weights": {
+            "L_V_attractive": 1.0,
+            "L_V_repulsive": 1.0,
+            "L_beta_sig": 1.0,
+            "L_beta_noise": 0.1,
+        },
     }
     optimizer = _build_optimizer(train_cfg)
 
@@ -364,26 +369,31 @@ def test_one_batch_training_step(dataset_dir: Path) -> None:
 
 def test_oc_loss_weights_scale_saved_components() -> None:
     components = {
-        "L_V": tf.constant(2.0, dtype=tf.float32),
         "L_V_attractive": tf.constant(0.5, dtype=tf.float32),
         "L_V_repulsive": tf.constant(1.5, dtype=tf.float32),
-        "L_beta": tf.constant(3.0, dtype=tf.float32),
         "L_beta_noise": tf.constant(1.0, dtype=tf.float32),
         "L_beta_sig": tf.constant(2.0, dtype=tf.float32),
     }
 
     _weight_oc_components(
         components,
-        {"loss_weights": {"L_V": 0.5, "L_beta": 2.0}},
+        {
+            "loss_weights": {
+                "L_V_attractive": 0.5,
+                "L_V_repulsive": 0.25,
+                "L_beta_sig": 2.0,
+                "L_beta_noise": 0.1,
+            }
+        },
     )
 
-    assert float(components["L_V"]) == pytest.approx(1.0)
     assert float(components["L_V_attractive"]) == pytest.approx(0.25)
-    assert float(components["L_V_repulsive"]) == pytest.approx(0.75)
-    assert float(components["L_beta"]) == pytest.approx(6.0)
-    assert float(components["L_beta_noise"]) == pytest.approx(2.0)
+    assert float(components["L_V_repulsive"]) == pytest.approx(0.375)
+    assert float(components["L_V"]) == pytest.approx(0.625)
     assert float(components["L_beta_sig"]) == pytest.approx(4.0)
-    assert float(components["L_total"]) == pytest.approx(7.0)
+    assert float(components["L_beta_noise"]) == pytest.approx(0.1)
+    assert float(components["L_beta"]) == pytest.approx(4.1)
+    assert float(components["L_total"]) == pytest.approx(4.725)
 
 
 def test_truth_object_energy_threshold_removes_and_remaps_objects() -> None:

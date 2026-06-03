@@ -26,8 +26,11 @@ def test_train_config_composes() -> None:
     assert cfg.training.truncate == "energy_desc"
     assert cfg.training.qmin_reference == 1.0
     assert cfg.training.qmin_schedule.points[1] == [5, 0.01]
-    assert cfg.training.loss_weights.L_V == 1.0
-    assert cfg.training.loss_weights.L_beta == 1.0
+    assert "s_B" not in cfg.training
+    assert cfg.training.loss_weights.L_V_attractive == 1.0
+    assert cfg.training.loss_weights.L_V_repulsive == 1.0
+    assert cfg.training.loss_weights.L_beta_sig == 1.0
+    assert cfg.training.loss_weights.L_beta_noise == 0.1
     assert cfg.model.max_vertices == 1024
     assert cfg.run_name is None
 

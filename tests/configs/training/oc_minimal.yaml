@@ -15,12 +15,13 @@ qmin_schedule:
     - [0, 0.1]
     - [5, 0.01]
     - [10, 1e-4]
-s_B: 0.1
 beta_stabilizing: soft_q_scaling
 beta_term_option: paper
 loss_weights:
-  L_V: 1.0
-  L_beta: 1.0
+  L_V_attractive: 1.0
+  L_V_repulsive: 1.0
+  L_beta_sig: 1.0
+  L_beta_noise: 0.1
 
 save_every: 20
 log_components_every: 1

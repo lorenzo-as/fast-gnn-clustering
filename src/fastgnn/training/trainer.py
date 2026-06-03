@@ -223,7 +223,6 @@ def _train_step(
             cluster_index_per_event=tf.cast(flat["hit_object_id"], tf.int32),
             batch=batch_idx,
             qmin=train_cfg.get("qmin", 1.0) if qmin is None else qmin,
-            s_B=train_cfg.get("s_B", 0.1),
             beta_stabilizing=train_cfg.get("beta_stabilizing", "soft_q_scaling"),
             beta_term_option=train_cfg.get("beta_term_option", "paper"),
             return_components=True,
@@ -273,7 +272,6 @@ def _eval_step(
         cluster_index_per_event=tf.cast(flat["hit_object_id"], tf.int32),
         batch=batch_idx,
         qmin=train_cfg.get("qmin", 1.0) if qmin is None else qmin,
-        s_B=train_cfg.get("s_B", 0.1),
         beta_stabilizing=train_cfg.get("beta_stabilizing", "soft_q_scaling"),
         beta_term_option=train_cfg.get("beta_term_option", "paper"),
         return_components=True,
@@ -286,21 +284,30 @@ def _eval_step(
 
 def _weight_oc_components(components: dict[str, tf.Tensor], train_cfg: dict) -> None:
     """Scale OC component dict in place to match the optimized objective."""
-    l_v_weight, l_beta_weight = _oc_loss_weights(train_cfg)
-    for key in ("L_V", "L_V_attractive", "L_V_repulsive"):
+    weights = _oc_loss_weights(train_cfg)
+
+    components["L_V_attractive"] = weights["L_V_attractive"] * components["L_V_attractive"]
+    components["L_V_repulsive"] = weights["L_V_repulsive"] * components["L_V_repulsive"]
+    components["L_beta_sig"] = weights["L_beta_sig"] * components["L_beta_sig"]
+    components["L_beta_noise"] = weights["L_beta_noise"] * components["L_beta_noise"]
+
+    for key in ("L_beta_norms_term", "L_beta_logbeta_term"):
         if key in components:
-            components[key] = l_v_weight * components[key]
-    for key in ("L_beta", "L_beta_noise", "L_beta_sig", "L_beta_norms_term", "L_beta_logbeta_term"):
-        if key in components:
-            components[key] = l_beta_weight * components[key]
+            components[key] = weights["L_beta_sig"] * components[key]
+
+    components["L_V"] = components["L_V_attractive"] + components["L_V_repulsive"]
+    components["L_beta"] = components["L_beta_sig"] + components["L_beta_noise"]
     components["L_total"] = components["L_V"] + components["L_beta"]
 
 
-def _oc_loss_weights(train_cfg: dict) -> tuple[float, float]:
+def _oc_loss_weights(train_cfg: dict) -> dict[str, float]:
     weights = train_cfg.get("loss_weights") or {}
-    l_v_weight = weights.get("L_V", 1.0)
-    l_beta_weight = weights.get("L_beta", 1.0)
-    return l_v_weight, l_beta_weight
+    return {
+        "L_V_attractive": float(weights.get("L_V_attractive", 1.0)),
+        "L_V_repulsive": float(weights.get("L_V_repulsive", 1.0)),
+        "L_beta_sig": float(weights.get("L_beta_sig", 1.0)),
+        "L_beta_noise": float(weights.get("L_beta_noise", 0.1)),
+    }
 
 
 def _mean_components(components_per_batch: list[dict[str, tf.Tensor]]) -> dict[str, float]:
