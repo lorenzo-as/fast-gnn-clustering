@@ -12,9 +12,11 @@ from fastgnn.geometry import xyz_to_eta_phi
 PROPERTY_NAMES = (
     "sum_energy",
     "sum_et",
-    "eta_et_weighted",
-    "phi_et_weighted",
-    "z_et_weighted",
+    "x_energy_weighted",
+    "y_energy_weighted",
+    "z_energy_weighted",
+    "eta_energy_weighted",
+    "phi_energy_weighted",
     "n_hits",
     "core_shower_length",
 )
@@ -35,9 +37,8 @@ def compute_object_properties(
     Args:
         hits: Mapping of hit-field names to arrays with shape ``(n_hits,)``.
             Requested properties determine the required fields. ``energy`` is
-            always required. ET-weighted properties additionally use ``et`` or
-            derive it from ``energy`` and ``eta``. Missing ``eta`` or ``phi``
-            values are derived from ``x``, ``y``, and ``z``.
+            always required. Energy-weighted position properties use ``x``,
+            ``y``, ``z``, and either stored or derived ``eta``/``phi``.
         hit_object_id: Integer array with shape ``(n_hits,)``. Each entry is the
             object ID assigned to that hit. ID ``0`` is noise.
         weights: Optional per-hit weights with shape ``(n_hits,)``. Defaults to
@@ -85,7 +86,7 @@ def compute_object_properties_from_links(
 ) -> dict[str, np.ndarray]:
     """Compute object properties from weighted hit-to-object links.
 
-    Each link contributes independently to energy sums and ET-weighted
+    Each link contributes independently to energy sums and energy-weighted
     positions. Duplicate ``(object ID, hit index)`` links count only once for
     ``n_hits`` and ``core_shower_length``.
 
@@ -148,8 +149,7 @@ def compute_object_properties_from_links(
     if "sum_energy" in property_names:
         result["sum_energy"] = sum_links(weights * energy[hit_indices])
 
-    et_properties = {"sum_et", "eta_et_weighted", "phi_et_weighted", "z_et_weighted"}
-    if set(property_names) & et_properties:
+    if "sum_et" in property_names:
         derived_eta_phi = None
 
         def geometry() -> tuple[np.ndarray, np.ndarray]:
@@ -163,32 +163,58 @@ def compute_object_properties_from_links(
             return derived_eta_phi
 
         eta = None
-        if "eta_et_weighted" in property_names or "et" not in hits:
+        if "et" not in hits:
             eta = _field(hits, "eta") if "eta" in hits else geometry()[0]
         et = _field(hits, "et") if "et" in hits else energy / np.cosh(eta)
         linked_et = weights * et[hit_indices]
-        sum_et = sum_links(linked_et)
+        result["sum_et"] = sum_links(linked_et)
 
-        def et_mean(values: np.ndarray, cos_values: np.ndarray | None = None) -> np.ndarray:
+    position_properties = {
+        "x_energy_weighted",
+        "y_energy_weighted",
+        "z_energy_weighted",
+        "eta_energy_weighted",
+        "phi_energy_weighted",
+    }
+    if set(property_names) & position_properties:
+        derived_eta_phi = None
+
+        def geometry() -> tuple[np.ndarray, np.ndarray]:
+            nonlocal derived_eta_phi
+            if derived_eta_phi is None:
+                derived_eta_phi = xyz_to_eta_phi(
+                    _field(hits, "x"),
+                    _field(hits, "y"),
+                    _field(hits, "z"),
+                )
+            return derived_eta_phi
+
+        linked_energy = weights * energy[hit_indices]
+        linked_sum_energy = sum_links(linked_energy)
+
+        def energy_mean(values: np.ndarray, cos_values: np.ndarray | None = None) -> np.ndarray:
             out = np.full(n_objects, np.nan, dtype=np.float32)
-            ok = sum_et != 0
-            numerator = sum_links(linked_et * values[hit_indices])
+            ok = linked_sum_energy != 0
+            numerator = sum_links(linked_energy * values[hit_indices])
             if cos_values is None:
-                out[ok] = numerator[ok] / sum_et[ok]
+                out[ok] = numerator[ok] / linked_sum_energy[ok]
             else:
-                denominator = sum_links(linked_et * cos_values[hit_indices])
+                denominator = sum_links(linked_energy * cos_values[hit_indices])
                 out[ok] = np.arctan2(numerator[ok], denominator[ok])
             return out
 
-        if "sum_et" in property_names:
-            result["sum_et"] = sum_et
-        if "eta_et_weighted" in property_names:
-            result["eta_et_weighted"] = et_mean(eta)
-        if "phi_et_weighted" in property_names:
+        if "x_energy_weighted" in property_names:
+            result["x_energy_weighted"] = energy_mean(_field(hits, "x"))
+        if "y_energy_weighted" in property_names:
+            result["y_energy_weighted"] = energy_mean(_field(hits, "y"))
+        if "z_energy_weighted" in property_names:
+            result["z_energy_weighted"] = energy_mean(_field(hits, "z"))
+        if "eta_energy_weighted" in property_names:
+            eta = _field(hits, "eta") if "eta" in hits else geometry()[0]
+            result["eta_energy_weighted"] = energy_mean(eta)
+        if "phi_energy_weighted" in property_names:
             phi = _field(hits, "phi") if "phi" in hits else geometry()[1]
-            result["phi_et_weighted"] = et_mean(np.sin(phi), np.cos(phi))
-        if "z_et_weighted" in property_names:
-            result["z_et_weighted"] = et_mean(_field(hits, "z"))
+            result["phi_energy_weighted"] = energy_mean(np.sin(phi), np.cos(phi))
 
     count_properties = {"n_hits", "core_shower_length"}
     if set(property_names) & count_properties:

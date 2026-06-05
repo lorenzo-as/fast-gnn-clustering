@@ -53,7 +53,7 @@ def dataset_dir(tmp_path: Path) -> Path:
         yaml.safe_dump(
             {
                 "format": "fastgnn-canonical-ragged-parquet",
-                "format_version": 3,
+                "format_version": 4,
                 "hit_features": ["x", "y", "z", "energy"],
             },
             sort_keys=False,
@@ -187,7 +187,7 @@ def test_hit_features_are_required(tmp_path: Path) -> None:
         )
     ]
     ak.to_parquet(ak.Array(records), tmp_path / "events.parquet")
-    (tmp_path / "metadata.yaml").write_text("format_version: 3\n", encoding="utf-8")
+    (tmp_path / "metadata.yaml").write_text("format_version: 4\n", encoding="utf-8")
 
     with pytest.raises(KeyError, match="hit_features"):
         _ = CaloDataset(tmp_path).hit_features

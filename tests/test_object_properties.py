@@ -69,10 +69,12 @@ def test_build_hit_features_does_not_compute_unrequested_derived_fields(monkeypa
     np.testing.assert_array_equal(hits["energy"], [1.0])
 
 
-def test_compute_object_properties_uses_et_weights_and_dense_object_ids() -> None:
+def test_compute_object_properties_uses_energy_weights_and_dense_object_ids() -> None:
     hits = {
         "energy": np.array([1.0, 2.0, 3.0, 4.0, 5.0]),
-        "et": np.array([1.0, 2.0, 3.0, 4.0, 5.0]),
+        "et": np.array([10.0, 10.0, 10.0, 10.0, 10.0]),
+        "x": np.array([1.0, 2.0, 4.0, 8.0, 16.0]),
+        "y": np.array([2.0, 4.0, 8.0, 16.0, 32.0]),
         "eta": np.array([1.0, 2.0, 4.0, 8.0, 16.0]),
         "phi": np.array([np.pi - 0.1, -np.pi + 0.1, np.pi, 1.0, 2.0]),
         "z": np.array([10.0, 20.0, 40.0, 80.0, 160.0]),
@@ -86,13 +88,15 @@ def test_compute_object_properties_uses_et_weights_and_dense_object_ids() -> Non
     )
 
     np.testing.assert_allclose(props["sum_energy"], [6.0, 4.0, 0.0])
-    np.testing.assert_allclose(props["sum_et"], [6.0, 4.0, 0.0])
-    np.testing.assert_allclose(props["eta_et_weighted"][:2], [17.0 / 6.0, 8.0])
-    np.testing.assert_allclose(props["z_et_weighted"][:2], [170.0 / 6.0, 80.0])
-    assert abs(abs(float(props["phi_et_weighted"][0])) - np.pi) < 0.1
+    np.testing.assert_allclose(props["sum_et"], [30.0, 10.0, 0.0])
+    np.testing.assert_allclose(props["x_energy_weighted"][:2], [17.0 / 6.0, 8.0])
+    np.testing.assert_allclose(props["y_energy_weighted"][:2], [34.0 / 6.0, 16.0])
+    np.testing.assert_allclose(props["eta_energy_weighted"][:2], [17.0 / 6.0, 8.0])
+    np.testing.assert_allclose(props["z_energy_weighted"][:2], [170.0 / 6.0, 80.0])
+    assert abs(abs(float(props["phi_energy_weighted"][0])) - np.pi) < 0.1
     np.testing.assert_array_equal(props["n_hits"], [3, 1, 0])
     np.testing.assert_array_equal(props["core_shower_length"], [2, 1, 0])
-    assert np.isnan(props["eta_et_weighted"][2])
+    assert np.isnan(props["eta_energy_weighted"][2])
 
 
 def test_link_aggregation_counts_duplicate_hit_object_pair_once() -> None:
@@ -111,6 +115,7 @@ def test_link_aggregation_counts_duplicate_hit_object_pair_once() -> None:
         linked_object_ids=np.array([7, 7]),
         weights=np.array([0.25, 0.75]),
         object_ids=np.array([7]),
+        properties=("sum_energy", "n_hits"),
     )
 
     np.testing.assert_allclose(props["sum_energy"], [4.0])
@@ -258,8 +263,10 @@ def test_conversion_metadata_uses_hit_features_and_retains_physical_fields(
     )
 
     metadata = yaml.safe_load((output_dir / "metadata.yaml").read_text())
-    assert metadata["format_version"] == 3
+    assert metadata["format_version"] == 4
     assert metadata["hit_features"] == ["x", "y", "z", "eta", "energy", "layer"]
+    assert "x_energy_weighted" in metadata["required_fields"]["truth.objects"]
+    assert "eta_energy_weighted" in metadata["required_fields"]["truth.objects"]
     assert "feature_names" not in metadata
     assert "materialized_hit_features" not in metadata
 

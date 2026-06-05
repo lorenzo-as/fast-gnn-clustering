@@ -7,7 +7,6 @@ from fastgnn.evaluation.oc_metrics import (
     binned_fake_rate,
     evaluate_oc_padded,
 )
-from fastgnn.geometry import xyz_to_eta_phi
 from fastgnn.training.oc_outputs import OCOutputLayout, split_oc_outputs
 
 
@@ -155,10 +154,10 @@ def test_oc_evaluation_seed_matching_by_xyz_distance_and_binned_rates() -> None:
     assert seed_classes == ["matched_seed", "matched_seed", "noise_fake", "duplicate_fake"]
 
     event_features = features[0]
-    expected_truth1_xyz = _et_weighted_xyz(event_features, np.array([0, 1, 5]))
-    expected_pred1_xyz = _et_weighted_xyz(event_features, np.array([0, 1]))
-    expected_truth2_xyz = _et_weighted_xyz(event_features, np.array([2, 3]))
-    expected_pred2_xyz = _et_weighted_xyz(event_features, np.array([2, 3]))
+    expected_truth1_xyz = _energy_weighted_xyz(event_features, np.array([0, 1, 5]))
+    expected_pred1_xyz = _energy_weighted_xyz(event_features, np.array([0, 1]))
+    expected_truth2_xyz = _energy_weighted_xyz(event_features, np.array([2, 3]))
+    expected_pred2_xyz = _energy_weighted_xyz(event_features, np.array([2, 3]))
     expected_distances = [
         np.linalg.norm(expected_pred1_xyz - expected_truth1_xyz),
         np.linalg.norm(expected_pred2_xyz - expected_truth2_xyz),
@@ -238,9 +237,7 @@ def _logit(values: np.ndarray) -> np.ndarray:
     return np.log(values / (1.0 - values))
 
 
-def _et_weighted_xyz(features: np.ndarray, indices: np.ndarray) -> np.ndarray:
+def _energy_weighted_xyz(features: np.ndarray, indices: np.ndarray) -> np.ndarray:
     xyz = features[indices, :3]
     energy = features[indices, 3]
-    eta, _ = xyz_to_eta_phi(xyz[:, 0], xyz[:, 1], xyz[:, 2])
-    et = energy / np.cosh(eta)
-    return np.average(xyz, weights=et, axis=0)
+    return np.average(xyz, weights=energy, axis=0)

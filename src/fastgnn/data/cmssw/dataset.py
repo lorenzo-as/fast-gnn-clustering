@@ -198,7 +198,7 @@ def convert_cmssw_root(
 
     metadata = {
         "format": "fastgnn-canonical-ragged-parquet",
-        "format_version": 3,
+        "format_version": 4,
         "source": "cmssw",
         "n_events": len(records),
         "source_files": [str(Path(path)) for path in input_files],
