@@ -13,7 +13,6 @@ from statsmodels.stats.proportion import proportion_confint
 
 from fastgnn.data.base import EventRecord
 from fastgnn.data.object_properties import compute_object_properties
-from fastgnn.geometry import xyz_to_eta_phi
 from fastgnn.training.objectcondensation_loss import get_clustering_np
 from fastgnn.training.oc_outputs import OCOutputLayout, split_oc_outputs
 
@@ -83,6 +82,8 @@ class _EventEval:
     max_match_distance: float
     min_energy_ratio: float
     max_energy_ratio: float
+    matching_algorithm: str
+    hungarian_energy_ratio_log_weight: float
     n_valid_hits: int
     clustering: np.ndarray
     truth_ids: np.ndarray
@@ -113,6 +114,8 @@ class _EventEval:
         max_match_distance: float,
         min_energy_ratio: float,
         max_energy_ratio: float,
+        matching_algorithm: str,
+        hungarian_energy_ratio_log_weight: float,
     ) -> _EventEval:
         valid = np.ones(len(hit_object_id), dtype=bool) if mask is None else mask.astype(bool)
         labels = np.asarray(hit_object_id[valid], dtype=np.int32)
@@ -151,6 +154,8 @@ class _EventEval:
             max_match_distance=max_match_distance,
             min_energy_ratio=min_energy_ratio,
             max_energy_ratio=max_energy_ratio,
+            matching_algorithm=_validate_matching_algorithm(matching_algorithm),
+            hungarian_energy_ratio_log_weight=float(hungarian_energy_ratio_log_weight),
             n_valid_hits=int(valid.sum()),
             clustering=clustering,
             truth_ids=truth_ids,
@@ -180,11 +185,13 @@ def evaluate_oc_padded(
     max_match_distance: float = 10.0,
     min_energy_ratio: float = 0.5,
     max_energy_ratio: float = 2.0,
+    matching_algorithm: str = "hungarian",
+    hungarian_energy_ratio_log_weight: float = 0.0,
 ) -> OCEvaluation:
     """
     Evaluate OC predictions on a padded batch.
 
-    ``features`` must contain unnormalised ``x``, ``y``, ``z``, and ``energy``
+    ``features`` must contain unnormalized ``x``, ``y``, ``z``, and ``energy``
     fields. They are an evaluation payload, independent of the model inputs.
     """
     layout = layout or (OCOutputLayout.from_config(model_cfg) if model_cfg is not None else None)
@@ -211,6 +218,8 @@ def evaluate_oc_padded(
                 max_match_distance=max_match_distance,
                 min_energy_ratio=min_energy_ratio,
                 max_energy_ratio=max_energy_ratio,
+                matching_algorithm=matching_algorithm,
+                hungarian_energy_ratio_log_weight=hungarian_energy_ratio_log_weight,
             )
             for event_idx in range(preds.shape[0])
         ]
@@ -233,6 +242,8 @@ def evaluate_oc_event(
     max_match_distance: float = 10.0,
     min_energy_ratio: float = 0.5,
     max_energy_ratio: float = 2.0,
+    matching_algorithm: str = "hungarian",
+    hungarian_energy_ratio_log_weight: float = 0.0,
 ) -> OCEvaluation:
     """Evaluate one padded or unpadded event."""
     ctx = _EventEval.build(
@@ -250,6 +261,8 @@ def evaluate_oc_event(
         max_match_distance=max_match_distance,
         min_energy_ratio=min_energy_ratio,
         max_energy_ratio=max_energy_ratio,
+        matching_algorithm=matching_algorithm,
+        hungarian_energy_ratio_log_weight=hungarian_energy_ratio_log_weight,
     )
     truth_rows = _truth_rows(ctx)
     pred_rows = _pred_rows(ctx)
@@ -489,7 +502,12 @@ def _match_rows(ctx: _EventEval) -> list[dict[str, Any]]:
     intersection, intersection_hits = _overlap_matrices(ctx)
     rows = []
     for truth_pos, pred_pos in _matched_positions(
-        centroid_distance, valid_match, ctx.max_match_distance
+        centroid_distance,
+        energy_ratio,
+        valid_match,
+        max_match_distance=ctx.max_match_distance,
+        algorithm=ctx.matching_algorithm,
+        hungarian_energy_ratio_log_weight=ctx.hungarian_energy_ratio_log_weight,
     ):
         truth_id = int(ctx.truth_ids[truth_pos])
         seed_index = int(ctx.seed_indices[pred_pos])
@@ -577,6 +595,8 @@ def _event_row(ctx: _EventEval, n_matches: int) -> dict[str, Any]:
         "max_match_distance": float(ctx.max_match_distance),
         "min_energy_ratio": float(ctx.min_energy_ratio),
         "max_energy_ratio": float(ctx.max_energy_ratio),
+        "matching_algorithm": ctx.matching_algorithm,
+        "hungarian_energy_ratio_log_weight": float(ctx.hungarian_energy_ratio_log_weight),
     }
 
 
@@ -646,14 +666,76 @@ def _overlap_matrices(ctx: _EventEval) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _matched_positions(
-    centroid_distance: np.ndarray, valid_match: np.ndarray, max_match_distance: float
+    centroid_distance: np.ndarray,
+    energy_ratio: np.ndarray,
+    valid_match: np.ndarray,
+    *,
+    max_match_distance: float,
+    algorithm: str,
+    hungarian_energy_ratio_log_weight: float,
+) -> list[tuple[int, int]]:
+    algorithm = _validate_matching_algorithm(algorithm)
+    if algorithm == "greedy":
+        return _greedy_matched_positions(centroid_distance, energy_ratio, valid_match)
+    return _hungarian_matched_positions(
+        centroid_distance,
+        energy_ratio,
+        valid_match,
+        max_match_distance=max_match_distance,
+        energy_ratio_log_weight=hungarian_energy_ratio_log_weight,
+    )
+
+
+def _hungarian_matched_positions(
+    centroid_distance: np.ndarray,
+    energy_ratio: np.ndarray,
+    valid_match: np.ndarray,
+    *,
+    max_match_distance: float,
+    energy_ratio_log_weight: float,
 ) -> list[tuple[int, int]]:
     finite_costs = centroid_distance[np.isfinite(centroid_distance)]
     large_cost = (
         1.0 if len(finite_costs) == 0 else float(finite_costs.max() + max_match_distance + 1.0)
     )
-    row_ind, col_ind = linear_sum_assignment(np.where(valid_match, centroid_distance, large_cost))
+    cost = centroid_distance.copy()
+    if energy_ratio_log_weight != 0:
+        cost = cost + float(energy_ratio_log_weight) * np.abs(np.log(energy_ratio))
+    row_ind, col_ind = linear_sum_assignment(np.where(valid_match, cost, large_cost))
     return [(int(t), int(p)) for t, p in zip(row_ind, col_ind, strict=True) if valid_match[t, p]]
+
+
+def _greedy_matched_positions(
+    centroid_distance: np.ndarray,
+    energy_ratio: np.ndarray,
+    valid_match: np.ndarray,
+) -> list[tuple[int, int]]:
+    pred_best: list[tuple[int, int]] = []
+    for pred_pos in range(valid_match.shape[1]):
+        truth_candidates = np.flatnonzero(valid_match[:, pred_pos])
+        if len(truth_candidates) == 0:
+            continue
+        distances = centroid_distance[truth_candidates, pred_pos]
+        truth_pos = int(truth_candidates[np.argmin(distances)])
+        pred_best.append((truth_pos, pred_pos))
+
+    matches: list[tuple[int, int]] = []
+    for truth_pos in sorted({truth_pos for truth_pos, _ in pred_best}):
+        pred_candidates = [
+            pred_pos for candidate_truth, pred_pos in pred_best if candidate_truth == truth_pos
+        ]
+        ratios = energy_ratio[truth_pos, pred_candidates]
+        ratio_distance = np.abs(np.log(ratios))
+        pred_pos = int(pred_candidates[int(np.argmin(ratio_distance))])
+        matches.append((truth_pos, pred_pos))
+    return matches
+
+
+def _validate_matching_algorithm(algorithm: str) -> str:
+    algorithm = str(algorithm).lower()
+    if algorithm not in {"hungarian", "greedy"}:
+        raise ValueError("matching_algorithm must be 'hungarian' or 'greedy'")
+    return algorithm
 
 
 def _event_labels(hit_object_id: np.ndarray, mask: np.ndarray | None, event_idx: int) -> np.ndarray:
@@ -731,7 +813,7 @@ def _concat_evaluations(evaluations: list[OCEvaluation]) -> OCEvaluation:
 def _required_feature(features: np.ndarray, feature_names: list[str], name: str) -> np.ndarray:
     if name not in feature_names:
         raise ValueError(
-            f"OC evaluation requires unnormalised hit feature {name!r}. "
+            f"OC evaluation requires unnormalized hit feature {name!r}. "
             f"Available evaluation features: {', '.join(feature_names)}"
         )
     return np.asarray(features[:, feature_names.index(name)], dtype=np.float64)
@@ -774,45 +856,28 @@ def _reco_properties_by_assignment(
         hits,
         assignments,
         object_ids=object_ids,
-        properties=("sum_energy", "sum_et", "eta_et_weighted", "phi_et_weighted", "z_et_weighted"),
+        properties=(
+            "sum_energy",
+            "sum_et",
+            "x_energy_weighted",
+            "y_energy_weighted",
+            "z_energy_weighted",
+            "eta_energy_weighted",
+            "phi_energy_weighted",
+        ),
     )
-    et = _et_weights(hits)
     return {
         int(object_id): {
             "energy": float(props["sum_energy"][pos]),
             "et": float(props["sum_et"][pos]),
-            "x": _weighted_mean(hits["x"], et, assignments == object_id),
-            "y": _weighted_mean(hits["y"], et, assignments == object_id),
-            "z": _none_if_nan(props["z_et_weighted"][pos]),
-            "eta": _none_if_nan(props["eta_et_weighted"][pos]),
-            "phi": _none_if_nan(props["phi_et_weighted"][pos]),
+            "x": _none_if_nan(props["x_energy_weighted"][pos]),
+            "y": _none_if_nan(props["y_energy_weighted"][pos]),
+            "z": _none_if_nan(props["z_energy_weighted"][pos]),
+            "eta": _none_if_nan(props["eta_energy_weighted"][pos]),
+            "phi": _none_if_nan(props["phi_energy_weighted"][pos]),
         }
         for pos, object_id in enumerate(object_ids)
     }
-
-
-def _et_weights(hits: dict[str, np.ndarray]) -> np.ndarray:
-    if "et" in hits:
-        return np.asarray(hits["et"], dtype=np.float64)
-    eta = (
-        np.asarray(hits["eta"], dtype=np.float64)
-        if "eta" in hits
-        else xyz_to_eta_phi(hits["x"], hits["y"], hits["z"])[0]
-    )
-    return np.asarray(hits["energy"], dtype=np.float64) / np.cosh(eta)
-
-
-def _weighted_mean(
-    values: np.ndarray | None, weights: np.ndarray, mask: np.ndarray
-) -> float | None:
-    if values is None or not np.any(mask):
-        return None
-    weight_sum = float(weights[mask].sum())
-    return (
-        float(np.mean(values[mask]))
-        if weight_sum <= 0
-        else float(np.average(values[mask], weights=weights[mask]))
-    )
 
 
 def _none_if_nan(value: float) -> float | None:

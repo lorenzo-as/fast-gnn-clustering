@@ -3,6 +3,7 @@ import polars as pl
 import pytest
 
 from fastgnn.evaluation.oc_metrics import (
+    _matched_positions,
     binned_efficiency,
     binned_fake_rate,
     evaluate_oc_padded,
@@ -164,7 +165,11 @@ def test_oc_evaluation_seed_matching_by_xyz_distance_and_binned_rates() -> None:
     ]
 
     matches = evaluation.matches.sort("truth_id")
-    np.testing.assert_allclose(matches["centroid_distance"].to_numpy(), expected_distances)
+    np.testing.assert_allclose(
+        matches["centroid_distance"].to_numpy(),
+        expected_distances,
+        rtol=1e-6,
+    )
     np.testing.assert_allclose(matches["energy_ratio"].to_numpy(), [5.0 / 6.0, 1.0])
     np.testing.assert_allclose(matches["energy_response"].to_numpy(), [5.0 / 6.0, 1.0])
     np.testing.assert_allclose(matches["model_energy_reco"].to_numpy(), [6.1, 9.5])
@@ -199,6 +204,73 @@ def test_binned_efficiency_uses_zero_interval_for_empty_bins() -> None:
     assert efficiency["efficiency_confidence_high"].to_list()[0] == 0.0
 
 
+def test_hungarian_matching_can_penalize_energy_ratio_log_distance() -> None:
+    centroid_distance = np.array(
+        [
+            [0.00, 0.10],
+            [0.11, 0.12],
+        ],
+        dtype=np.float64,
+    )
+    energy_ratio = np.array(
+        [
+            [10.0, 1.0],
+            [1.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    valid_match = np.ones_like(centroid_distance, dtype=bool)
+
+    distance_only = _matched_positions(
+        centroid_distance,
+        energy_ratio,
+        valid_match,
+        max_match_distance=1.0,
+        algorithm="hungarian",
+        hungarian_energy_ratio_log_weight=0.0,
+    )
+    energy_penalized = _matched_positions(
+        centroid_distance,
+        energy_ratio,
+        valid_match,
+        max_match_distance=1.0,
+        algorithm="hungarian",
+        hungarian_energy_ratio_log_weight=1.0,
+    )
+
+    assert distance_only == [(0, 0), (1, 1)]
+    assert energy_penalized == [(0, 1), (1, 0)]
+
+
+def test_greedy_matching_resolves_pred_then_truth_conflicts() -> None:
+    centroid_distance = np.array(
+        [
+            [0.20, 0.10, 0.40],
+            [0.30, 0.20, 0.05],
+        ],
+        dtype=np.float64,
+    )
+    energy_ratio = np.array(
+        [
+            [1.20, 1.05, 1.00],
+            [1.00, 1.00, 2.00],
+        ],
+        dtype=np.float64,
+    )
+    valid_match = np.ones_like(centroid_distance, dtype=bool)
+
+    matches = _matched_positions(
+        centroid_distance,
+        energy_ratio,
+        valid_match,
+        max_match_distance=1.0,
+        algorithm="greedy",
+        hungarian_energy_ratio_log_weight=0.0,
+    )
+
+    assert matches == [(0, 1), (1, 2)]
+
+
 def test_oc_evaluation_without_regressions_keeps_nullable_model_columns() -> None:
     beta = np.array([0.9, 0.8], dtype=np.float64)
     preds = np.zeros((1, 2, 3), dtype=np.float64)
@@ -221,7 +293,7 @@ def test_oc_evaluation_without_regressions_keeps_nullable_model_columns() -> Non
 
 
 def test_oc_evaluation_requires_physical_hit_features() -> None:
-    with pytest.raises(ValueError, match="requires unnormalised hit feature 'energy'"):
+    with pytest.raises(ValueError, match="requires unnormalized hit feature 'energy'"):
         evaluate_oc_padded(
             preds=np.array([[[3.0, 0.0, 0.0]]]),
             hit_object_id=np.array([[1]], dtype=np.int32),
