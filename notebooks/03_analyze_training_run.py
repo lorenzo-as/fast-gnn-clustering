@@ -5,17 +5,16 @@
 # ]
 # ///
 
-import itertools
-
 import marimo
 
 __generated_with = "0.23.6"
-app = marimo.App()
+app = marimo.App(width="medium")
 
 
 @app.cell(hide_code=True)
 def _():
     import os
+    import itertools
     from pathlib import Path
 
     import marimo as mo
@@ -72,6 +71,7 @@ def _():
         PLOTTING_CONFIG,
         PRJ_ROOT,
         Path,
+        itertools,
         mo,
         mplhep,
         np,
@@ -466,6 +466,11 @@ def _(grid_search_thresholds, np, val_beta, val_cluster_coords, val_data):
 
 @app.cell
 def _(mo):
+    matching_algorithm_selector = mo.ui.dropdown(
+        options=["hungarian", "belle"],
+        label="Matching Algorithm",
+        value="hungarian",
+    )
     matching_distance_threshold_selector = mo.ui.number(
         label="Distance Threshold in cm", value=50, step=0.5
     )
@@ -475,23 +480,30 @@ def _(mo):
     matching_energy_ratio_max_selector = mo.ui.number(
         label="Maximum Energy Ratio", value=10.0, step=0.01
     )
+    hungarian_energy_ratio_log_weight_selector = mo.ui.number(
+        label="Hungarian Energy Ratio Log Weight", value=0.0, step=0.1
+    )
 
     # vstack
     mo.vstack(
         [
             mo.md(
-                "**Select the maximum euclidean distance (x,y,z) in cm and the minimum and maximum energy ratio between predicted clusters and true objects for the matching.**"
+                "**Select the matching algorithm, maximum euclidean distance (x,y,z) in cm, energy-ratio window, and optional Hungarian energy-ratio penalty.**"
             ),
             mo.hstack(
                 [
+                    matching_algorithm_selector,
                     matching_distance_threshold_selector,
                     matching_energy_ratio_min_selector,
                     matching_energy_ratio_max_selector,
+                    hungarian_energy_ratio_log_weight_selector,
                 ]
             ),
         ]
     )
     return (
+        hungarian_energy_ratio_log_weight_selector,
+        matching_algorithm_selector,
         matching_distance_threshold_selector,
         matching_energy_ratio_max_selector,
         matching_energy_ratio_min_selector,
@@ -502,6 +514,8 @@ def _(mo):
 def _(
     best_oc_thresholds,
     evaluate_oc_padded,
+    hungarian_energy_ratio_log_weight_selector,
+    matching_algorithm_selector,
     matching_distance_threshold_selector,
     matching_energy_ratio_max_selector,
     matching_energy_ratio_min_selector,
@@ -525,6 +539,8 @@ def _(
         max_match_distance=matching_distance_threshold_selector.value,
         min_energy_ratio=matching_energy_ratio_min_selector.value,
         max_energy_ratio=matching_energy_ratio_max_selector.value,
+        matching_algorithm=matching_algorithm_selector.value,
+        hungarian_energy_ratio_log_weight=hungarian_energy_ratio_log_weight_selector.value,
     )
     count_summary = oc_eval.count_summary()
     seed_summary = oc_eval.seed_summary()
@@ -536,350 +552,7 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ### Energy and Position Regression
-    """)
-    return
-
-
-@app.cell
-def _(np, pl):
-    REFERENCE_LINE_KWARGS = {"color": "green", "linestyle": "--"}
-
-    def et_weighted_str(s: str) -> str:
-        return s
-        """Wraps a Latex string (must start and end with $) to mark weighting by transverse energy."""
-        assert s[0] == "$" and s[-1] == "$"
-        return r"$\langle " + s[1:-1] + r"\rangle_\mathrm{E_T}$"
-
-    def log_edges(values, bins=12):
-        values = np.asarray(values, dtype=float)
-        return np.logspace(
-            np.log10(values.min()),
-            np.log10(values.max()),
-            bins + 1,
-        )
-
-    def binned_profile(x, y, bins):
-        x = np.asarray(x, dtype=float)
-        y = np.asarray(y, dtype=float)
-        bins = np.asarray(bins, dtype=float)
-
-        assert x.shape == y.shape
-        assert np.all(np.isfinite(x)) and np.all(np.isfinite(y))
-        assert np.all(np.diff(bins) > 0)
-
-        idx = np.digitize(x, bins) - 1
-
-        rows = []
-        for i, (lo, hi) in enumerate(itertools.pairwise(bins[:-1], bins[1:])):
-            values = y[idx == i]
-            n = values.size
-
-            if n:
-                q16, q84 = np.quantile(values, [0.16, 0.84])
-                rows.append(
-                    {
-                        "bin_low": lo,
-                        "bin_high": hi,
-                        "n": int(n),
-                        "mean": values.mean(),
-                        "median": np.median(values),
-                        "sigma68": 0.5 * (q84 - q16),
-                    }
-                )
-            else:
-                rows.append(
-                    {
-                        "bin_low": lo,
-                        "bin_high": hi,
-                        "n": 0,
-                        "mean": None,
-                        "median": None,
-                        "sigma68": None,
-                    }
-                )
-
-        return pl.DataFrame(rows)
-
-    def plot_profile_points(ax, table, y_col, *, color="black", marker="o", label=None):
-        if table.is_empty():
-            return
-        table = table.filter(pl.col(y_col).is_not_null())
-        if table.is_empty():
-            return
-        bin_low = table["bin_low"].to_numpy()
-        bin_high = table["bin_high"].to_numpy()
-        x = np.where(
-            (bin_low > 0) & (bin_high > 0), np.sqrt(bin_low * bin_high), 0.5 * (bin_low + bin_high)
-        )
-        xerr = [x - bin_low, bin_high - x]
-        ax.errorbar(
-            x,
-            table[y_col].to_numpy(),
-            xerr=xerr,
-            fmt=marker,
-            color=color,
-            capsize=2,
-            label=label,
-        )
-
-    return (
-        REFERENCE_LINE_KWARGS,
-        binned_profile,
-        et_weighted_str,
-        log_edges,
-        plot_profile_points,
-    )
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    #### Energy and Transverse Energy Response
-    """)
-    return
-
-
-@app.cell
-def _(mo):
-    show_median_response = mo.ui.checkbox(
-        label="Show median response in profile plots", value=False
-    )
-    show_median_response
-    return (show_median_response,)
-
-
-@app.cell
-def _(
-    PLOTTING_CONFIG,
-    REFERENCE_LINE_KWARGS,
-    binned_profile,
-    et_weighted_str,
-    log_edges,
-    mo,
-    np,
-    oc_eval,
-    plot_profile_points,
-    plt,
-    show_median_response,
-):
-    ## Response histograms for energy and transverse energy
-    _fig1, _axs = plt.subplots(
-        nrows=1, ncols=2, figsize=PLOTTING_CONFIG["figsize"]["A4"]["fullwidth_2pane"]
-    )
-
-    _matches = oc_eval.matches
-    _energy_response = _matches["energy_response"]
-    _et_response = _matches["et_response"]
-
-    for _ax, _values, _title, _xlabel in [
-        (_axs[0], _energy_response, "Energy Response", r"$E_\mathrm{pred}/E_\mathrm{true}$"),
-        (
-            _axs[1],
-            _et_response,
-            r"Transverse Energy Response",
-            r"$E_{T,\mathrm{pred}}/E_{T,\mathrm{true}}$",
-        ),
-    ]:
-        _upper_lim = 15
-        _bins = np.linspace(0, _upper_lim, 50)
-        _ax.hist(_values, bins=_bins, color="black", histtype="step")
-        _ax.axvline(1.0, **REFERENCE_LINE_KWARGS)
-        _ax.set_xlim(None, _upper_lim)
-        _ax.set_xlabel(_xlabel)
-        _ax.set_xlim(0, _upper_lim)
-        _ax.set_ylim(1e-3, None)
-        _txt1 = "Overflow:\nMean:"
-        _txt2 = f"{(_values > _upper_lim).sum() / len(_values):.2%} \n{_values.mean():.2f}"
-        _ax.text(0.6, 0.95, _txt1, transform=_ax.transAxes, ha="left", va="top", fontsize="small")
-        _ax.text(0.82, 0.95, _txt2, transform=_ax.transAxes, ha="left", va="top", fontsize="small")
-    _axs[0].set_ylabel("Matched clusters")
-    plt.tight_layout()
-
-    ## Response vs truth for transverse energy and eta
-    _fig2, _axs = plt.subplots(
-        nrows=1, ncols=2, figsize=PLOTTING_CONFIG["figsize"]["A4"]["fullwidth_2pane"]
-    )
-    _aggs = ["mean", "median"] if show_median_response.value else ["mean"]
-
-    _truth_et, _et_response_vs_et = (
-        _matches.select(["truth_et", "et_response"]).drop_nulls().to_numpy().T
-    )
-    _truth_eta, _et_response_vs_eta = (
-        _matches.select(["truth_centroid_eta", "et_response"]).drop_nulls().to_numpy().T
-    )
-
-    _axs[0].scatter(_truth_et, _et_response_vs_et, alpha=0.25, s=10, color="grey")
-    for _agg in _aggs:
-        plot_profile_points(
-            _axs[0],
-            binned_profile(_truth_et, _et_response_vs_et, log_edges(_truth_et)),
-            _agg,
-            label=_agg.capitalize(),
-            color="black" if _agg == "mean" else "purple",
-        )
-    _axs[0].set_xscale("log")
-    _axs[0].set_xlabel(r"$E_{T,\mathrm{true}}$ [GeV]")
-    _axs[0].set_ylabel(r"$E_{T,\mathrm{pred}}/E_{T,\mathrm{true}}$")
-
-    _abs_eta = np.abs(_truth_eta)
-    _axs[1].scatter(_abs_eta, _et_response_vs_eta, alpha=0.25, s=10, color="grey")
-    _eta_bins = np.linspace(np.quantile(_abs_eta, 0.01), np.quantile(_abs_eta, 0.99), 12)
-    for _agg in _aggs:
-        plot_profile_points(
-            _axs[1],
-            binned_profile(_abs_eta, _et_response_vs_eta, _eta_bins),
-            _agg,
-            label=_agg.capitalize(),
-            color="black" if _agg == "mean" else "purple",
-        )
-    _axs[1].set_xlabel(et_weighted_str(r"$\eta_\mathrm{{true}}$"))
-
-    for _ax in _axs:
-        _ax.grid(alpha=0.25)
-        _ax.set_yscale("log")
-        _ax.axhline(1.0, **REFERENCE_LINE_KWARGS)
-        _ax.legend()
-    plt.tight_layout()
-
-    ## Predicted vs true energy and transverse energy
-    _fig3, _axs = plt.subplots(
-        nrows=1,
-        ncols=2,
-        figsize=PLOTTING_CONFIG["figsize"]["A4"]["fullwidth_2pane"],
-    )
-
-    for _ax, _en, _label in [
-        (_axs[0], "energy", "E_{"),
-        (_axs[1], "et", "E_{T,"),
-    ]:
-        _truth, _pred = (
-            oc_eval.matches.select(f"truth_{_en}", f"sum_{_en}_reco").drop_nulls().to_numpy().T
-        )
-        _truth_et_all = oc_eval.truth.select(f"truth_{_en}").drop_nulls().to_numpy()
-        _et_bins = log_edges(_truth_et_all)
-
-        _ax.scatter(_truth, _pred, alpha=0.25, s=10, color="grey")
-        plot_profile_points(
-            _ax,
-            binned_profile(_truth, _pred, log_edges(_truth)),
-            "mean",
-        )
-        _low = min(float(_truth.min()), float(_pred.min()))
-        _high = max(float(_truth.max()), float(_pred.max()))
-        _ax.plot([_low, _high], [_low, _high], **REFERENCE_LINE_KWARGS)
-        _ax.set_xscale("log")
-        _ax.set_yscale("log")
-        _ax.set(
-            xlabel=rf"${_label}" + r"\mathrm{{true}}}$ [GeV]",
-            ylabel=rf"${_label}" + r"\mathrm{{pred}}}$ [GeV]",
-        )
-        _axs[0].grid(alpha=0.25)
-
-    plt.tight_layout()
-    _fig3
-
-    mo.vstack([_fig1, _fig2, _fig3])
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    #### Position Resolution
-    """)
-    return
-
-
-@app.cell
-def _(PLOTTING_CONFIG, et_weighted_str, oc_eval, plt):
-    _fig1, _axs = plt.subplots(
-        nrows=1,
-        ncols=3,
-        figsize=PLOTTING_CONFIG["figsize"]["A4"]["fullwidth_3pane"],
-    )
-    for _ax, _col, _label in [
-        (
-            _axs[0],
-            "eta_residual",
-            et_weighted_str(r"$\eta_\mathrm{true}$")
-            + " - "
-            + et_weighted_str(r"$\eta_\mathrm{pred}$"),
-        ),
-        (
-            _axs[1],
-            "phi_residual",
-            et_weighted_str(r"$\phi_\mathrm{true}$")
-            + " - "
-            + et_weighted_str(r"$\phi_\mathrm{pred}$"),
-        ),
-        (
-            _axs[2],
-            "z_residual",
-            et_weighted_str(r"$z_\mathrm{true}$")
-            + " - "
-            + et_weighted_str(r"$z_\mathrm{pred}$")
-            + " [cm]",
-        ),
-    ]:
-        _values = oc_eval.matches[_col].drop_nulls()
-        if len(_values):
-            _ax.hist(_values, bins=50, color="black", histtype="step")
-            _ax.axvline(0.0, color="grey", linestyle="--")
-        else:
-            _ax.text(0.5, 0.5, "No entries", transform=_ax.transAxes, ha="center", va="center")
-        _ax.set_xlabel(_label)
-        _ax.grid(alpha=0.25)
-    _axs[0].set_ylabel("Matched clusters")
-
-    plt.tight_layout()
-    _fig1
-    return
-
-
-@app.cell
-def _(
-    PLOTTING_CONFIG,
-    REFERENCE_LINE_KWARGS,
-    binned_profile,
-    et_weighted_str,
-    log_edges,
-    oc_eval,
-    plot_profile_points,
-    plt,
-):
-    _fig1, _axs = plt.subplots(
-        nrows=1,
-        ncols=3,
-        figsize=PLOTTING_CONFIG["figsize"]["A4"]["fullwidth_3pane"],
-    )
-    for _ax, _col, _ylabel in [
-        (_axs[0], "relative_eta_residual", et_weighted_str(r"$\Delta_\mathrm{rel}\eta$")),
-        (_axs[1], "relative_phi_residual", et_weighted_str(r"$\Delta_\mathrm{rel}\phi$")),
-        (_axs[2], "relative_z_residual", et_weighted_str(r"$\Delta_\mathrm{rel}z$")),
-    ]:
-        _truth_et, _values = oc_eval.matches.select("truth_et", _col).drop_nulls().to_numpy().T
-        if len(_truth_et):
-            _table = binned_profile(_truth_et, _values, log_edges(_truth_et))
-            plot_profile_points(_ax, _table, "mean")
-            _ax.axhline(0.0, **REFERENCE_LINE_KWARGS)
-            _ax.set_xscale("log")
-        else:
-            _ax.text(0.5, 0.5, "No entries", transform=_ax.transAxes, ha="center", va="center")
-        _ax.set(
-            xlabel=r"$E_{T,\mathrm{true}}$ [GeV]",
-            ylabel=_ylabel,
-        )
-        _ax.grid(alpha=0.25)
-    plt.tight_layout()
-    _fig1
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    #### Efficiency and Fake Rate over Cluster Energy
+    ### Efficiency and Fake Rate
     """)
     return
 
@@ -925,10 +598,16 @@ def _(np):
         centers, xerr = log_bin_centers_and_xerr(bin_edges)
 
         values = table[metric].to_numpy()
-        yerr = [
-            values - table[f"{metric}_confidence_low"].to_numpy(),
-            table[f"{metric}_confidence_high"].to_numpy() - values,
-        ]
+        confidence_low = table[f"{metric}_confidence_low"].to_numpy()
+        confidence_high = table[f"{metric}_confidence_high"].to_numpy()
+        yerr = np.clip(
+            [
+                values - confidence_low,
+                confidence_high - values,
+            ],
+            a_min=0.0,
+            a_max=None,
+        )
 
         ax.errorbar(
             centers,
@@ -1095,8 +774,342 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## TODO
+    ### Energy and Position Regression
     """)
+    return
+
+
+@app.cell
+def _(itertools, np, pl):
+    REFERENCE_LINE_KWARGS = {"color": "green", "linestyle": "--"}
+
+    def energy_weighted_str(s: str) -> str:
+        """Wraps a Latex string (must start and end with $) to mark weighting by energy."""
+        assert s[0] == "$" and s[-1] == "$"
+        return r"$\langle " + s[1:-1] + r"\rangle_\mathrm{E}$"
+
+    def log_edges(values, bins=12):
+        values = np.asarray(values, dtype=float)
+        return np.logspace(
+            np.log10(values.min()),
+            np.log10(values.max()),
+            bins + 1,
+        )
+
+    def binned_profile(x, y, bins):
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        bins = np.asarray(bins, dtype=float)
+
+        assert x.shape == y.shape
+        assert np.all(np.isfinite(x)) and np.all(np.isfinite(y))
+        assert np.all(np.diff(bins) > 0)
+
+        idx = np.digitize(x, bins) - 1
+
+        rows = []
+        for i, (lo, hi) in enumerate(itertools.pairwise(bins)):
+            values = y[idx == i]
+            n = values.size
+
+            if n:
+                q16, q84 = np.quantile(values, [0.16, 0.84])
+                rows.append(
+                    {
+                        "bin_low": lo,
+                        "bin_high": hi,
+                        "n": int(n),
+                        "mean": values.mean(),
+                        "median": np.median(values),
+                        "sigma68": 0.5 * (q84 - q16),
+                    }
+                )
+            else:
+                rows.append(
+                    {
+                        "bin_low": lo,
+                        "bin_high": hi,
+                        "n": 0,
+                        "mean": None,
+                        "median": None,
+                        "sigma68": None,
+                    }
+                )
+
+        return pl.DataFrame(rows)
+
+    def plot_profile_points(ax, table, y_col, *, color="black", marker="o", label=None):
+        if table.is_empty():
+            return
+        table = table.filter(pl.col(y_col).is_not_null())
+        if table.is_empty():
+            return
+        bin_low = table["bin_low"].to_numpy()
+        bin_high = table["bin_high"].to_numpy()
+        x = np.where(
+            (bin_low > 0) & (bin_high > 0), np.sqrt(bin_low * bin_high), 0.5 * (bin_low + bin_high)
+        )
+        xerr = [x - bin_low, bin_high - x]
+        ax.errorbar(
+            x,
+            table[y_col].to_numpy(),
+            xerr=xerr,
+            fmt=marker,
+            color=color,
+            capsize=2,
+            label=label,
+        )
+
+    return (
+        REFERENCE_LINE_KWARGS,
+        binned_profile,
+        energy_weighted_str,
+        log_edges,
+        plot_profile_points,
+    )
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    #### Energy and Transverse Energy Response
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    show_median_response = mo.ui.checkbox(
+        label="Show median response in profile plots", value=False
+    )
+    show_median_response
+    return (show_median_response,)
+
+
+@app.cell
+def _(
+    PLOTTING_CONFIG,
+    REFERENCE_LINE_KWARGS,
+    binned_profile,
+    energy_weighted_str,
+    log_edges,
+    mo,
+    np,
+    oc_eval,
+    plot_profile_points,
+    plt,
+    show_median_response,
+):
+    ## Response histograms for energy and transverse energy
+    _fig1, _axs = plt.subplots(
+        nrows=1, ncols=2, figsize=PLOTTING_CONFIG["figsize"]["A4"]["fullwidth_2pane"]
+    )
+
+    _matches = oc_eval.matches
+    _energy_response = _matches["energy_response"]
+    _et_response = _matches["et_response"]
+
+    for _ax, _values, _title, _xlabel in [
+        (_axs[0], _energy_response, "Energy Response", r"$E_\mathrm{pred}/E_\mathrm{true}$"),
+        (
+            _axs[1],
+            _et_response,
+            r"Transverse Energy Response",
+            r"$E_{T,\mathrm{pred}}/E_{T,\mathrm{true}}$",
+        ),
+    ]:
+        _upper_lim = 15
+        _bins = np.linspace(0, _upper_lim, 50)
+        _ax.hist(_values, bins=_bins, color="black", histtype="step")
+        _ax.axvline(1.0, **REFERENCE_LINE_KWARGS)
+        _ax.set_xlim(None, _upper_lim)
+        _ax.set_xlabel(_xlabel)
+        _ax.set_xlim(0, _upper_lim)
+        _ax.set_ylim(1e-3, None)
+        _txt1 = "Overflow:\nMean:"
+        _txt2 = f"{(_values > _upper_lim).sum() / len(_values):.2%} \n{_values.mean():.2f}"
+        _ax.text(0.6, 0.95, _txt1, transform=_ax.transAxes, ha="left", va="top", fontsize="small")
+        _ax.text(0.82, 0.95, _txt2, transform=_ax.transAxes, ha="left", va="top", fontsize="small")
+    _axs[0].set_ylabel("Matched clusters")
+    plt.tight_layout()
+
+    ## Response vs truth for transverse energy and eta
+    _fig2, _axs = plt.subplots(
+        nrows=1, ncols=2, figsize=PLOTTING_CONFIG["figsize"]["A4"]["fullwidth_2pane"]
+    )
+    _aggs = ["mean", "median"] if show_median_response.value else ["mean"]
+
+    _truth_et, _et_response_vs_et = (
+        _matches.select(["truth_et", "et_response"]).drop_nulls().to_numpy().T
+    )
+    _truth_eta, _et_response_vs_eta = (
+        _matches.select(["truth_centroid_eta", "et_response"]).drop_nulls().to_numpy().T
+    )
+
+    _axs[0].scatter(_truth_et, _et_response_vs_et, alpha=0.25, s=10, color="grey")
+    for _agg in _aggs:
+        plot_profile_points(
+            _axs[0],
+            binned_profile(_truth_et, _et_response_vs_et, log_edges(_truth_et)),
+            _agg,
+            label=_agg.capitalize(),
+            color="black" if _agg == "mean" else "purple",
+        )
+    _axs[0].set_xscale("log")
+    _axs[0].set_xlabel(r"$E_{T,\mathrm{true}}$ [GeV]")
+    _axs[0].set_ylabel(r"$E_{T,\mathrm{pred}}/E_{T,\mathrm{true}}$")
+
+    _abs_eta = np.abs(_truth_eta)
+    _axs[1].scatter(_abs_eta, _et_response_vs_eta, alpha=0.25, s=10, color="grey")
+    _eta_bins = np.linspace(np.quantile(_abs_eta, 0.01), np.quantile(_abs_eta, 0.99), 12)
+    for _agg in _aggs:
+        plot_profile_points(
+            _axs[1],
+            binned_profile(_abs_eta, _et_response_vs_eta, _eta_bins),
+            _agg,
+            label=_agg.capitalize(),
+            color="black" if _agg == "mean" else "purple",
+        )
+    _axs[1].set_xlabel(energy_weighted_str(r"$\eta_\mathrm{{true}}$"))
+
+    for _ax in _axs:
+        _ax.grid(alpha=0.25)
+        _ax.set_yscale("log")
+        _ax.axhline(1.0, **REFERENCE_LINE_KWARGS)
+        _ax.legend()
+    plt.tight_layout()
+
+    ## Predicted vs true energy and transverse energy
+    _fig3, _axs = plt.subplots(
+        nrows=1,
+        ncols=2,
+        figsize=PLOTTING_CONFIG["figsize"]["A4"]["fullwidth_2pane"],
+    )
+
+    for _ax, _en, _label in [
+        (_axs[0], "energy", "E_{"),
+        (_axs[1], "et", "E_{T,"),
+    ]:
+        _truth, _pred = (
+            oc_eval.matches.select(f"truth_{_en}", f"sum_{_en}_reco").drop_nulls().to_numpy().T
+        )
+        _truth_et_all = oc_eval.truth.select(f"truth_{_en}").drop_nulls().to_numpy()
+        _et_bins = log_edges(_truth_et_all)
+
+        _ax.scatter(_truth, _pred, alpha=0.25, s=10, color="grey")
+        plot_profile_points(
+            _ax,
+            binned_profile(_truth, _pred, log_edges(_truth)),
+            "mean",
+        )
+        _low = min(float(_truth.min()), float(_pred.min()))
+        _high = max(float(_truth.max()), float(_pred.max()))
+        _ax.plot([_low, _high], [_low, _high], **REFERENCE_LINE_KWARGS)
+        _ax.set_xscale("log")
+        _ax.set_yscale("log")
+        _ax.set(
+            xlabel=rf"${_label}" + r"\mathrm{{true}}}$ [GeV]",
+            ylabel=rf"${_label}" + r"\mathrm{{pred}}}$ [GeV]",
+        )
+        _axs[0].grid(alpha=0.25)
+
+    plt.tight_layout()
+    _fig3
+
+    mo.vstack([_fig1, _fig2, _fig3])
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    #### Position Resolution
+    """)
+    return
+
+
+@app.cell
+def _(PLOTTING_CONFIG, energy_weighted_str, oc_eval, plt):
+    _fig1, _axs = plt.subplots(
+        nrows=1,
+        ncols=3,
+        figsize=PLOTTING_CONFIG["figsize"]["A4"]["fullwidth_3pane"],
+    )
+    for _ax, _col, _label in [
+        (
+            _axs[0],
+            "eta_residual",
+            energy_weighted_str(r"$\eta_\mathrm{true}$")
+            + " - "
+            + energy_weighted_str(r"$\eta_\mathrm{pred}$"),
+        ),
+        (
+            _axs[1],
+            "phi_residual",
+            energy_weighted_str(r"$\phi_\mathrm{true}$")
+            + " - "
+            + energy_weighted_str(r"$\phi_\mathrm{pred}$"),
+        ),
+        (
+            _axs[2],
+            "z_residual",
+            energy_weighted_str(r"$z_\mathrm{true}$")
+            + " - "
+            + energy_weighted_str(r"$z_\mathrm{pred}$")
+            + " [cm]",
+        ),
+    ]:
+        _values = oc_eval.matches[_col].drop_nulls()
+        if len(_values):
+            _ax.hist(_values, bins=50, color="black", histtype="step")
+            _ax.axvline(0.0, color="grey", linestyle="--")
+        else:
+            _ax.text(0.5, 0.5, "No entries", transform=_ax.transAxes, ha="center", va="center")
+        _ax.set_xlabel(_label)
+        _ax.grid(alpha=0.25)
+    _axs[0].set_ylabel("Matched clusters")
+
+    plt.tight_layout()
+    _fig1
+    return
+
+
+@app.cell
+def _(
+    PLOTTING_CONFIG,
+    REFERENCE_LINE_KWARGS,
+    binned_profile,
+    energy_weighted_str,
+    log_edges,
+    oc_eval,
+    plot_profile_points,
+    plt,
+):
+    _fig1, _axs = plt.subplots(
+        nrows=1,
+        ncols=3,
+        figsize=PLOTTING_CONFIG["figsize"]["A4"]["fullwidth_3pane"],
+    )
+    for _ax, _col, _ylabel in [
+        (_axs[0], "relative_eta_residual", energy_weighted_str(r"$\Delta_\mathrm{rel}\eta$")),
+        (_axs[1], "relative_phi_residual", energy_weighted_str(r"$\Delta_\mathrm{rel}\phi$")),
+        (_axs[2], "relative_z_residual", energy_weighted_str(r"$\Delta_\mathrm{rel}z$")),
+    ]:
+        _truth_et, _values = oc_eval.matches.select("truth_et", _col).drop_nulls().to_numpy().T
+        if len(_truth_et):
+            _table = binned_profile(_truth_et, _values, log_edges(_truth_et))
+            plot_profile_points(_ax, _table, "mean")
+            _ax.axhline(0.0, **REFERENCE_LINE_KWARGS)
+            _ax.set_xscale("log")
+        else:
+            _ax.text(0.5, 0.5, "No entries", transform=_ax.transAxes, ha="center", va="center")
+        _ax.set(
+            xlabel=r"$E_{T,\mathrm{true}}$ [GeV]",
+            ylabel=_ylabel,
+        )
+        _ax.grid(alpha=0.25)
+    plt.tight_layout()
+    _fig1
     return
 
 
@@ -1108,7 +1121,7 @@ def _(mo):
     return
 
 
-@app.cell(disabled=True)
+@app.cell
 def _(
     REFERENCE_LINE_KWARGS,
     best_oc_thresholds,
@@ -1190,6 +1203,7 @@ def _(
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 
+    zoom = 0.8
     _color_palette = [
         "#1f77b4",
         "#ff7f0e",
@@ -1271,7 +1285,6 @@ def _(
         mask=None,
         oc_eval=None,
         event_idx=0,
-        show_noise=False,
     ):
         _outputs = split_oc_outputs(preds[event_idx : event_idx + 1], oc_layout)
         _hit_object_id = hit_object_id[event_idx]
@@ -1308,6 +1321,9 @@ def _(
         _truth_colors = truth_object_colors(signal_ids)
 
         _seed_to_truth = event_seed_truth_matches(oc_eval, event_idx)
+        _truth_to_seed = {truth_id: seed_index for seed_index, truth_id in _seed_to_truth.items()}
+        _n_matched_clusters = len(_seed_to_truth)
+        _n_unpadded_hits = int(m.sum())
         _fake_seed_indices = [
             int(seed_index) for seed_index in _seed_indices if int(seed_index) not in _seed_to_truth
         ]
@@ -1348,7 +1364,7 @@ def _(
             ),
             row_heights=[0.58, 0.19, 0.23],
             vertical_spacing=0.06,
-            horizontal_spacing=0.035,
+            horizontal_spacing=0.085,
         )
 
         def _marker_size(values):
@@ -1360,23 +1376,22 @@ def _(
                 "β=%{customdata:.3f}<extra>" + object_label + "</extra>"
             )
 
-        if show_noise and noise.any():
-            for _col in (1, 3):
-                _fig.add_trace(
-                    go.Scatter3d(
-                        x=pred_c1[noise],
-                        y=pred_c2[noise],
-                        z=pred_c3[noise],
-                        customdata=_beta[noise],
-                        mode="markers",
-                        marker={"color": "rgba(150,150,150,0.45)", "size": 4},
-                        name="noise",
-                        showlegend=False,
-                        hovertemplate=_hover("noise"),
-                    ),
-                    row=1,
-                    col=_col,
-                )
+        if noise.any():
+            _fig.add_trace(
+                go.Scatter3d(
+                    x=pred_c1[noise],
+                    y=pred_c2[noise],
+                    z=pred_c3[noise],
+                    customdata=_beta[noise],
+                    mode="markers",
+                    marker={"color": "rgba(150,150,150,0.45)", "size": 4},
+                    name="truth noise",
+                    showlegend=False,
+                    hovertemplate=_hover("truth noise"),
+                ),
+                row=1,
+                col=1,
+            )
 
         for _object_id in _truth_ids:
             _object_mask = signal & (_hit_object_id == _object_id)
@@ -1398,6 +1413,24 @@ def _(
                 ),
                 row=1,
                 col=1,
+            )
+
+        _unassigned = _clustering < 0
+        if _unassigned.any():
+            _fig.add_trace(
+                go.Scatter3d(
+                    x=pred_c1[_unassigned],
+                    y=pred_c2[_unassigned],
+                    z=pred_c3[_unassigned],
+                    customdata=_beta[_unassigned],
+                    mode="markers",
+                    marker={"color": "rgba(190,170,135,0.65)", "size": 4},
+                    name="unassigned hits",
+                    showlegend=False,
+                    hovertemplate=_hover("unassigned hits"),
+                ),
+                row=1,
+                col=3,
             )
 
         for _seed_index in _seed_indices:
@@ -1550,6 +1583,16 @@ def _(
             )
 
         _truth_entries = truth_object_legend_entries(event, signal_ids, _truth_colors, top_n=10)
+        _truth_entries = [
+            (
+                color,
+                label,
+                add_seed_arrow_to_truth_description(
+                    description, _truth_to_seed.get(int(label.split()[-1]))
+                ),
+            )
+            for color, label, description in _truth_entries
+        ]
         _matched_entries = [
             (
                 _truth_colors[truth_id],
@@ -1569,13 +1612,23 @@ def _(
             f"<span style='color:{color}'>●</span> {description}"
             for color, _, description in _truth_entries
         )
+        if noise.any():
+            _truth_text += (
+                ("<br>" if _truth_entries else "")
+                + f"<span style='color:rgba(150,150,150,0.75)'>●</span> noise ({int(noise.sum())} hits)"
+            )
         _pred_text = "<b>Predicted clusters:</b><br>" + "<br>".join(
             f"<span style='color:{color}'>●</span> {label}"
             for color, label in _matched_entries + _fake_entries
         )
+        if _unassigned.any():
+            _pred_text += (
+                ("<br>" if (_matched_entries or _fake_entries) else "")
+                + f"<span style='color:rgb(190,170,135)'>●</span> unassigned ({int(_unassigned.sum())} hits)"
+            )
         if not _truth_entries:
-            _truth_text += "No signal truth clusters"
-        if not (_matched_entries or _fake_entries):
+            _truth_text += ("<br>" if noise.any() else "") + "No signal truth clusters"
+        if not (_matched_entries or _fake_entries or _unassigned.any()):
             _pred_text += "No predicted clusters"
 
         for _x, _text in [(0.015, _truth_text), (0.44, _pred_text)]:
@@ -1600,7 +1653,7 @@ def _(
         _fig.update_yaxes(visible=False, row=2, col=1)
 
         _display_event_id = getattr(event, "event_id", event_idx)
-        _camera = {"eye": {"x": 1.35, "y": 1.35, "z": 1.0}}
+        _camera = {"eye": {"x": -1 / zoom * 2.35, "y": -1 / zoom * 2.35, "z": 1 / zoom * 2.0}}
         _scene_layout = {
             "xaxis_title": "c1",
             "yaxis_title": "c2",
@@ -1612,14 +1665,15 @@ def _(
             title={
                 "text": (
                     f"Event {_display_event_id} | Truth clusters: {_n_truth_clusters} | "
-                    f"Predicted clusters: {_n_pred_clusters}"
+                    f"Predicted clusters: {_n_pred_clusters} | Matched clusters: {_n_matched_clusters} | "
+                    f"Unpadded hits: {_n_unpadded_hits}"
                 ),
                 "x": 0.02,
                 "xanchor": "left",
             },
             template="plotly_white",
             height=1080,
-            autosize=False,
+            autosize=True,
             barmode="overlay",
             legend={"orientation": "h", "y": -0.06, "x": 0},
             margin={"l": 35, "r": 35, "t": 90, "b": 35},
@@ -1647,6 +1701,15 @@ def _(
             for row in rows
             if row.get("seed_index") is not None and row.get("truth_id") is not None
         }
+
+    def add_seed_arrow_to_truth_description(description, seed_index):
+        if seed_index is None:
+            return description
+        return (
+            description[:-1] + f", ← seed hit {seed_index})"
+            if description.endswith(")")
+            else description
+        )
 
     def pdgid_to_name(pdgid):
         try:
@@ -1683,7 +1746,11 @@ def _(
 
     event_idx_selector = mo.ui.number(label="Event Index", start=0, stop=len(test_ds) - 1, step=1)
     event_idx_selector
-    return apply_truth_colors_to_event_display, event_idx_selector, plot_true_vs_pred_oc
+    return (
+        apply_truth_colors_to_event_display,
+        event_idx_selector,
+        plot_true_vs_pred_oc,
+    )
 
 
 @app.cell(hide_code=True)
@@ -1714,7 +1781,6 @@ def _(
         mask=test_data["mask"],
         oc_eval=oc_eval,
         event_idx=event_idx_selector.value,
-        show_noise=True,
     )
     mplhep.style.use("CMS")
     mo.ui.plotly(_fig, config={"responsive": True})
