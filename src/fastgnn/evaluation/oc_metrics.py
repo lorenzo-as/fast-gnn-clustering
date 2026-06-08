@@ -364,7 +364,8 @@ def grid_search_thresholds(
 ) -> tuple[dict[str, float], pl.DataFrame]:
     """Grid search OC thresholds for notebook operating-point scans.
 
-    ``objective="count_median"`` keeps the legacy count-based selector.
+    ``objective="count_median"`` keeps the legacy median count-based selector.
+    ``objective="count_mean"`` selects thresholds by mean absolute count error.
     ``objective="matched_f1"`` scores thresholds with matched-cluster object and
     energy-weighted F1 terms, using compact per-threshold summaries rather than
     materializing full evaluation tables.
@@ -374,8 +375,8 @@ def grid_search_thresholds(
     tbeta_values = np.linspace(0.05, 0.9, 20) if tbeta_values is None else tbeta_values
     td_values = np.linspace(0.05, 1.0, 20) if td_values is None else td_values
     objective = str(objective).lower()
-    if objective not in {"count_median", "matched_f1"}:
-        raise ValueError("objective must be 'count_median' or 'matched_f1'")
+    if objective not in {"count_median", "count_mean", "matched_f1"}:
+        raise ValueError("objective must be 'count_median', 'count_mean', or 'matched_f1'")
 
     n_truth = count_truth_objects(hit_object_id, mask=mask)
     masked_beta, masked_distances = _masked_beta_distances(beta, cluster_coords, mask)
@@ -442,8 +443,12 @@ def grid_search_thresholds(
             rows.append(_count_scan_row(tbeta, td, counts, n_truth))
 
     table = pl.DataFrame(rows)
+    if objective == "count_mean":
+        sort_by = ["mean_abs_diff", "median_abs_diff", "frac_exact"]
+    else:
+        sort_by = ["median_abs_diff", "mean_abs_diff", "frac_exact"]
     best = table.sort(
-        by=["median_abs_diff", "mean_abs_diff", "frac_exact"],
+        by=sort_by,
         descending=[False, False, True],
     ).row(0, named=True)
     return best, table

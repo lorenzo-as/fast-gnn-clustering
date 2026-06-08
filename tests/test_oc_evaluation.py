@@ -232,6 +232,42 @@ def test_grid_search_count_median_preserves_legacy_selector() -> None:
     assert progress_calls == [1]
 
 
+def test_grid_search_count_mean_selects_by_mean_abs_count_diff() -> None:
+    beta = np.zeros((3, 10), dtype=np.float64)
+    coords = np.zeros((3, 10, 2), dtype=np.float64)
+    labels = np.zeros((3, 10), dtype=np.int32)
+    mask = np.zeros((3, 10), dtype=bool)
+
+    for event_idx in (0, 1):
+        beta[event_idx, :2] = [0.9, 0.8]
+        coords[event_idx, :2] = [[0.0, 0.0], [1.0, 0.0]]
+        labels[event_idx, :2] = [1, 1]
+        mask[event_idx, :2] = True
+
+    beta[2, :10] = [0.9] * 9 + [0.4]
+    coords[2, :10] = [[float(idx), 0.0] for idx in range(10)]
+    labels[2, :10] = np.arange(1, 11)
+    mask[2, :10] = True
+
+    best, table = grid_search_thresholds(
+        beta=beta,
+        cluster_coords=coords,
+        hit_object_id=labels,
+        mask=mask,
+        tbeta_values=np.array([0.5]),
+        td_values=np.array([0.2, 2.0]),
+        objective="count_mean",
+    )
+
+    assert best["td"] == 0.2
+    assert best["mean_abs_diff"] == 1.0
+    median_best = table.sort(
+        by=["median_abs_diff", "mean_abs_diff", "frac_exact"],
+        descending=[False, False, True],
+    ).row(0, named=True)
+    assert median_best["td"] == 2.0
+
+
 def test_grid_search_matched_f1_scores_perfect_threshold() -> None:
     beta = np.array([[0.9, 0.8]], dtype=np.float64)
     coords = np.array([[[0.0, 0.0], [10.0, 0.0]]], dtype=np.float64)
