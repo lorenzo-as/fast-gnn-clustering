@@ -7,15 +7,18 @@
 
 import marimo
 
-__generated_with = "0.23.6"
+__generated_with = "0.23.8"
 app = marimo.App(width="medium")
 
 
-@app.cell(hide_code=True)
+@app.cell
 def _():
+    import json
     import os
     import itertools
+    from datetime import datetime
     from pathlib import Path
+    import pickle
 
     import marimo as mo
     import matplotlib.pyplot as plt
@@ -31,6 +34,7 @@ def _():
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
     mplhep.style.use("CMS")
+
     COLORS = {
         "train": "#4477AA",
         "val": "#EE6677",
@@ -71,10 +75,13 @@ def _():
         PLOTTING_CONFIG,
         PRJ_ROOT,
         Path,
+        datetime,
         itertools,
+        json,
         mo,
         mplhep,
         np,
+        pickle,
         pl,
         plt,
         runs_table,
@@ -106,7 +113,8 @@ def _(CaloDataset, OUTPUT_DIR, PRJ_ROOT, Path, mo, np, runs_table, yaml):
         mo.md("Please select a run to analyze."),
     )
     selected_run = Path(runs_table.value["path"][0])
-    best_model, history, config = load_run(OUTPUT_DIR / selected_run)
+    selected_run_dir = OUTPUT_DIR / selected_run
+    best_model, history, config = load_run(selected_run_dir)
     test_ds = CaloDataset(PRJ_ROOT / config["data"]["dataset_dir"], split="test")
     messages = [
         f"Loaded {'model, ' if best_model is not None else ''}history, and config for run: `{selected_run}`",
@@ -114,7 +122,7 @@ def _(CaloDataset, OUTPUT_DIR, PRJ_ROOT, Path, mo, np, runs_table, yaml):
     ]
 
     mo.md("\n\n".join(messages))
-    return best_model, config, history, test_ds
+    return best_model, config, history, selected_run_dir, test_ds
 
 
 @app.cell(hide_code=True)
@@ -125,7 +133,7 @@ def _(mo):
     return
 
 
-@app.cell(hide_code=True)
+@app.cell
 def _(COLORS, PLOTTING_CONFIG, config, history, mo, mplhep, np, pl, plt):
     mo.stop(history is None, mo.md("No training history found for this run."))
     train_components_df = pl.DataFrame(history["train_components"])
@@ -251,7 +259,7 @@ def _(mo):
     return
 
 
-@app.cell(hide_code=True)
+@app.cell(disabled=True, hide_code=True)
 def _(CaloDataset, PRJ_ROOT, config, mo, test_beta, test_data):
     full_data = CaloDataset(PRJ_ROOT / config["data"]["dataset_dir"], split=None).as_padded(
         max_vertices=config["model"]["max_vertices"],
@@ -384,10 +392,6 @@ def _(
 def _(mo):
     mo.md(r"""
     #### OC Threshold Selection
-
-    We find the $\beta$ and distance thresholds ($t_\beta$, $t_d$) that **minimize the median difference between truth number of clusters and predicted number of clusters on the validation data**. Then we evaluate on the test dataset.
-
-    *This is probably reasonable but needs a more refined way to do this*
     """)
     return
 
@@ -414,11 +418,20 @@ def _(
         normalize_features=config["training"].get("normalize_features", True),
         seed=config.get("seed", 0),
     )
+    val_eval_data = CaloDataset(PRJ_ROOT / config["data"]["dataset_dir"], split="val").as_padded(
+        max_vertices=config["model"]["max_vertices"],
+        feature_names=["x", "y", "z", "energy"],
+        truncate=config["training"].get("truncate", "first"),
+        normalize_features=False,
+        seed=config.get("seed", 0),
+    )
+    np.testing.assert_array_equal(val_eval_data["mask"], val_data["mask"])
+    np.testing.assert_array_equal(val_eval_data["hit_object_id"], val_data["hit_object_id"])
     val_preds = best_model.predict(val_data["features"], batch_size=1024, verbose=1)
     val_output_slices = split_oc_outputs(val_preds, oc_layout)
     val_beta = np.asarray(val_output_slices.beta)
     val_cluster_coords = np.asarray(val_output_slices.cluster_coords)
-    return val_beta, val_cluster_coords, val_data
+    return val_beta, val_cluster_coords, val_data, val_eval_data
 
 
 @app.cell(hide_code=True)
@@ -446,28 +459,15 @@ def _():
     )
 
 
-@app.cell(hide_code=True)
-def _(grid_search_thresholds, np, val_beta, val_cluster_coords, val_data):
-    _tbeta_values = np.linspace(0.001, 0.9, 50)
-    _td_values = np.linspace(0.05, 2.0, 40)
-
-    best_oc_thresholds, _grid_results = grid_search_thresholds(
-        beta=val_beta,
-        cluster_coords=val_cluster_coords,
-        hit_object_id=val_data["hit_object_id"],
-        mask=val_data.get("mask", None),
-        tbeta_values=_tbeta_values,
-        td_values=_td_values,
-    )
-
-    best_oc_thresholds
-    return (best_oc_thresholds,)
-
-
 @app.cell
 def _(mo):
+    threshold_objective_selector = mo.ui.dropdown(
+        options=["matched_f1", "count_median"],
+        label="Threshold Objective",
+        value="matched_f1",
+    )
     matching_algorithm_selector = mo.ui.dropdown(
-        options=["hungarian", "belle"],
+        options=["hungarian", "greedy"],
         label="Matching Algorithm",
         value="hungarian",
     )
@@ -483,13 +483,16 @@ def _(mo):
     hungarian_energy_ratio_log_weight_selector = mo.ui.number(
         label="Hungarian Energy Ratio Log Weight", value=0.0, step=0.1
     )
-
-    # vstack
+    start_calibration_button = mo.ui.run_button(
+        label="Start threshold calibration",
+        kind="success",
+    )
     mo.vstack(
         [
             mo.md(
-                "**Select the matching algorithm, maximum euclidean distance (x,y,z) in cm, energy-ratio window, and optional Hungarian energy-ratio penalty.**"
+                "**Select the threshold objective and matching parameters used for calibration.**"
             ),
+            threshold_objective_selector,
             mo.hstack(
                 [
                     matching_algorithm_selector,
@@ -499,6 +502,7 @@ def _(mo):
                     hungarian_energy_ratio_log_weight_selector,
                 ]
             ),
+            start_calibration_button,
         ]
     )
     return (
@@ -507,7 +511,135 @@ def _(mo):
         matching_distance_threshold_selector,
         matching_energy_ratio_max_selector,
         matching_energy_ratio_min_selector,
+        start_calibration_button,
+        threshold_objective_selector,
     )
+
+
+@app.cell(hide_code=True)
+def _(
+    datetime,
+    grid_search_thresholds,
+    hungarian_energy_ratio_log_weight_selector,
+    json,
+    matching_algorithm_selector,
+    matching_distance_threshold_selector,
+    matching_energy_ratio_max_selector,
+    matching_energy_ratio_min_selector,
+    mo,
+    np,
+    pl,
+    selected_run_dir,
+    start_calibration_button,
+    threshold_objective_selector,
+    val_beta,
+    val_cluster_coords,
+    val_data,
+    val_eval_data,
+):
+    mo.stop(
+        not start_calibration_button.value,
+        mo.md("Select a threshold objective, then click **Start threshold calibration**."),
+    )
+    _tbeta_values = np.linspace(0.001, 0.9, 50)
+    _td_values = np.linspace(0.05, 2.0, 40)
+    _progress_title = "Scanning OC thresholds"
+    _progress_subtitle = (
+        f"{len(_tbeta_values)} beta thresholds x {len(_td_values)} distance thresholds"
+    )
+
+    def _float_list(values):
+        return [float(value) for value in values]
+
+    def _read_cache(path):
+        if not path.exists():
+            return {"schema_version": 1, "records": []}
+        with path.open() as f:
+            cache = json.load(f)
+        cache.setdefault("schema_version", 1)
+        cache.setdefault("records", [])
+        return cache
+
+    def _write_cache(path, cache):
+        with path.open("w") as f:
+            json.dump(cache, f, indent=2, sort_keys=True)
+            f.write("\n")
+
+    _calibration_options = {
+        "schema_version": 1,
+        "objective": threshold_objective_selector.value,
+        "score_formula": "F1_E + 0.5 * F1_obj",
+        "tbeta_values": _float_list(_tbeta_values),
+        "td_values": _float_list(_td_values),
+        "feature_names": ["x", "y", "z", "energy"],
+    }
+    if threshold_objective_selector.value == "matched_f1":
+        _calibration_options["matching"] = {
+            "algorithm": matching_algorithm_selector.value,
+            "max_match_distance": float(matching_distance_threshold_selector.value),
+            "min_energy_ratio": float(matching_energy_ratio_min_selector.value),
+            "max_energy_ratio": float(matching_energy_ratio_max_selector.value),
+            "hungarian_energy_ratio_log_weight": float(
+                hungarian_energy_ratio_log_weight_selector.value
+            ),
+        }
+    _cache_path = selected_run_dir / "oc_threshold_calibrations.json"
+    _cache = _read_cache(_cache_path)
+    _cached_record = next(
+        (
+            record
+            for record in _cache["records"]
+            if record.get("calibration_options") == _calibration_options
+        ),
+        None,
+    )
+
+    if _cached_record is None:
+        best_oc_thresholds, _grid_results = grid_search_thresholds(
+            beta=val_beta,
+            cluster_coords=val_cluster_coords,
+            hit_object_id=val_data["hit_object_id"],
+            mask=val_data.get("mask", None),
+            tbeta_values=_tbeta_values,
+            td_values=_td_values,
+            objective=threshold_objective_selector.value,
+            features=val_eval_data["features"],
+            feature_names=["x", "y", "z", "energy"],
+            max_match_distance=matching_distance_threshold_selector.value,
+            min_energy_ratio=matching_energy_ratio_min_selector.value,
+            max_energy_ratio=matching_energy_ratio_max_selector.value,
+            matching_algorithm=matching_algorithm_selector.value,
+            hungarian_energy_ratio_log_weight=hungarian_energy_ratio_log_weight_selector.value,
+            progress=lambda values: mo.status.progress_bar(
+                values,
+                title=_progress_title,
+                subtitle=_progress_subtitle,
+                completion_title="OC threshold calibration complete",
+            ),
+        )
+        _record = {
+            "calibration_options": _calibration_options,
+            "best_thresholds": {
+                key: value.item() if hasattr(value, "item") else value
+                for key, value in best_oc_thresholds.items()
+            },
+            "created_at": datetime.now().astimezone().isoformat(),
+        }
+        _cache["records"].append(_record)
+        _write_cache(_cache_path, _cache)
+        _status = "Computed threshold calibration and wrote cache."
+    else:
+        best_oc_thresholds = _cached_record["best_thresholds"]
+        _status = "Loaded threshold calibration from cache."
+
+    mo.vstack(
+        [
+            mo.md(f"**{_status}**"),
+            mo.md(f"Cache file: `{_cache_path}`"),
+            mo.ui.table(pl.DataFrame([best_oc_thresholds])),
+        ]
+    )
+    return (best_oc_thresholds,)
 
 
 @app.cell(hide_code=True)
@@ -549,6 +681,49 @@ def _(
     return (oc_eval,)
 
 
+@app.cell
+def _(PRJ_ROOT, mo, selected_run_dir):
+    default_path = (
+        PRJ_ROOT / "plotting" / "efficiency_fake_rate" / f"{selected_run_dir.name}_oc_eval.pkl"
+    )
+    oc_eval_pickle_path = mo.ui.text(
+        label="OC evaluation pickle path",
+        value=str(default_path),
+        full_width=True,
+    )
+    save_oc_eval_button = mo.ui.run_button(
+        label="Save OC evaluation pickle",
+        kind="success",
+    )
+
+    _items = [oc_eval_pickle_path, save_oc_eval_button]
+    mo.vstack(_items)
+    return oc_eval_pickle_path, save_oc_eval_button
+
+
+@app.cell
+def _(
+    PRJ_ROOT,
+    Path,
+    mo,
+    oc_eval,
+    oc_eval_pickle_path,
+    pickle,
+    save_oc_eval_button,
+):
+    _out = None
+    if save_oc_eval_button.value:
+        _path = Path(oc_eval_pickle_path.value).expanduser()
+        if not _path.is_absolute():
+            _path = PRJ_ROOT / _path
+        _path.parent.mkdir(parents=True, exist_ok=True)
+        with _path.open("wb") as _f:
+            pickle.dump(oc_eval, _f)
+            _out = mo.md(f"Saved OC evaluation pickle to `{_path}`.")
+    _out
+    return
+
+
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
@@ -558,86 +733,10 @@ def _(mo):
 
 
 @app.cell
-def _(np):
-    def log_bin_centers_and_xerr(bin_edges):
-        """Return geometric bin centers and asymmetric x errors for log-scaled bins."""
-        centers = np.sqrt(bin_edges[:-1] * bin_edges[1:])
-        xerr = [
-            centers - bin_edges[:-1],
-            bin_edges[1:] - centers,
-        ]
-        return centers, xerr
+def _():
+    from fastgnn.plotting import plot_binned_efficiency, plot_binned_fake_rate
 
-    def plot_binned_metric(
-        ax,
-        table,
-        *,
-        metric,
-        xlabel,
-        ylabel,
-        threshold=None,
-        xlim=None,
-        ylim=None,
-        color="black",
-    ):
-        """
-        Plot a binned metric with asymmetric confidence intervals.
-
-        Expects columns:
-          - bin_low
-          - bin_high
-          - {metric}
-          - {metric}_confidence_low
-          - {metric}_confidence_high
-        """
-        bin_edges = np.append(
-            table["bin_low"].to_numpy(),
-            table["bin_high"].to_numpy()[-1],
-        )
-
-        centers, xerr = log_bin_centers_and_xerr(bin_edges)
-
-        values = table[metric].to_numpy()
-        confidence_low = table[f"{metric}_confidence_low"].to_numpy()
-        confidence_high = table[f"{metric}_confidence_high"].to_numpy()
-        yerr = np.clip(
-            [
-                values - confidence_low,
-                confidence_high - values,
-            ],
-            a_min=0.0,
-            a_max=None,
-        )
-
-        ax.errorbar(
-            centers,
-            values,
-            xerr=xerr,
-            yerr=yerr,
-            fmt="o",
-            color=color,
-        )
-
-        ax.set_xscale("log")
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(ylabel)
-
-        if threshold is not None:
-            ax.axvline(
-                threshold,
-                color="grey",
-                linestyle="--",
-            )
-
-        if xlim is not None:
-            ax.set_xlim(*xlim)
-
-        if ylim is not None:
-            ax.set_ylim(*ylim)
-
-        return ax
-
-    return (plot_binned_metric,)
+    return plot_binned_efficiency, plot_binned_fake_rate
 
 
 @app.cell
@@ -648,7 +747,8 @@ def _(
     log_edges,
     np,
     oc_eval,
-    plot_binned_metric,
+    plot_binned_efficiency,
+    plot_binned_fake_rate,
     plt,
     test_ds,
 ):
@@ -686,27 +786,21 @@ def _(
         figsize=PLOTTING_CONFIG["figsize"]["A4"]["fullwidth_2pane"],
     )
 
-    plot_binned_metric(
-        _axs[0],
-        _truth_energy_table,
-        metric="efficiency",
-        xlabel="Cluster truth energy [GeV]",
-        ylabel="Efficiency",
-        threshold=threshold,
-        xlim=(7e-1, 1e3),
-        ylim=(0.0, 1.0),
-    )
+    plot_binned_efficiency(_axs[0], _truth_energy_table, color="black")
+    _axs[0].set_xscale("log")
+    _axs[0].set_xlabel("Cluster truth energy [GeV]")
+    _axs[0].set_ylabel("Efficiency")
+    _axs[0].axvline(threshold, color="grey", linestyle="--")
+    _axs[0].set_xlim(7e-1, 1e3)
+    _axs[0].set_ylim(0.0, 1.0)
 
-    plot_binned_metric(
-        _axs[1],
-        _pred_energy_table,
-        metric="fake_rate",
-        xlabel="Cluster predicted energy [GeV]",
-        ylabel="Fake Rate",
-        threshold=threshold,
-        xlim=(1.5e-1, 1e3),
-        ylim=(-0.02, 1.0),
-    )
+    plot_binned_fake_rate(_axs[1], _pred_energy_table, color="black")
+    _axs[1].set_xscale("log")
+    _axs[1].set_xlabel("Cluster predicted energy [GeV]")
+    _axs[1].set_ylabel("Fake Rate")
+    _axs[1].axvline(threshold, color="grey", linestyle="--")
+    _axs[1].set_xlim(1.5e-1, 1e3)
+    _axs[1].set_ylim(-0.02, 1.0)
 
     assert (_pred_energy_table["fake_rate"] <= _axs[1].get_ylim()[1]).all()
 
@@ -730,7 +824,8 @@ def _(
     binned_fake_rate,
     log_edges,
     oc_eval,
-    plot_binned_metric,
+    plot_binned_efficiency,
+    plot_binned_fake_rate,
     plt,
 ):
     _fig1, _axs = plt.subplots(1, 3, figsize=PLOTTING_CONFIG["figsize"]["A4"]["fullwidth_3pane"])
@@ -754,14 +849,13 @@ def _(
         else:
             _table = binned_fake_rate(_frame, _col, _bins)
 
-        plot_binned_metric(
-            _ax,
-            _table,
-            metric=_metric,
-            xlabel=_xlabel,
-            ylabel="Efficiency" if _metric == "efficiency" else "Fake Rate",
-            ylim=(None, 1.0),
-        )
+        if _metric == "efficiency":
+            plot_binned_efficiency(_ax, _table, color="black")
+        else:
+            plot_binned_fake_rate(_ax, _table, color="black")
+        _ax.set_xscale("log")
+        _ax.set_xlabel(_xlabel)
+        _ax.set_ylabel("Efficiency" if _metric == "efficiency" else "Fake Rate")
         _ax.set_ylim(-0.02, 1.0)
         _ax.set_yticks([0.2, 0.4, 0.6, 0.8, 1.0])
         _ax.grid(alpha=0.25)
@@ -1189,21 +1283,19 @@ def _(mo):
     return
 
 
-@app.cell(hide_code=True)
+@app.cell
 def _(
     count_clusters_from_labels,
     count_truth_objects,
     get_clustering_np,
-    mo,
     np,
     oc_layout,
     split_oc_outputs,
-    test_ds,
 ):
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 
-    zoom = 0.8
+    zoom = 2
     _color_palette = [
         "#1f77b4",
         "#ff7f0e",
@@ -1276,12 +1368,36 @@ def _(
                 _trace_index += 1
         return fig
 
+    def project_event_coords(coords, projection_mode, raw_dims, global_pca):
+        coords = np.asarray(coords, dtype=np.float64)
+        if coords.ndim != 2:
+            raise ValueError(f"Expected 2D coordinates for plotting, got shape {coords.shape}")
+
+        if projection_mode == "Validation PCA":
+            centered = coords - global_pca["mean"]
+            projected = centered @ global_pca["components"].T
+            display = np.zeros((len(coords), 3), dtype=np.float64)
+            available = min(3, projected.shape[1])
+            if available > 0:
+                display[:, :available] = projected[:, :available]
+            axis_labels = [f"PC{i + 1}" for i in range(3)]
+            projection_label = "Validation PCA"
+        else:
+            display = np.column_stack([coords[:, dim] for dim in raw_dims])
+            axis_labels = [f"c{dim + 1}" for dim in raw_dims]
+            projection_label = "Raw dims"
+
+        return display, axis_labels, projection_label
+
     def plot_true_vs_pred_oc(
         tbeta,
         td,
         event,
         preds,
         hit_object_id,
+        projection_mode,
+        raw_dims,
+        global_pca,
         mask=None,
         oc_eval=None,
         event_idx=0,
@@ -1296,9 +1412,15 @@ def _(
 
         _beta = np.asarray(_outputs.beta[0])[m]
         _coords = np.asarray(_outputs.cluster_coords[0])[m]
-        pred_c1 = _coords[:, 0]
-        pred_c2 = _coords[:, 1] if _coords.shape[1] > 1 else np.zeros(len(_coords))
-        pred_c3 = _coords[:, 2] if _coords.shape[1] > 2 else np.zeros(len(_coords))
+        _display_coords, _axis_labels, _projection_label = project_event_coords(
+            _coords,
+            projection_mode=projection_mode,
+            raw_dims=raw_dims,
+            global_pca=global_pca,
+        )
+        pred_c1 = _display_coords[:, 0]
+        pred_c2 = _display_coords[:, 1]
+        pred_c3 = _display_coords[:, 2]
 
         _hit_object_id = _hit_object_id[m]
         signal = _hit_object_id > 0
@@ -1333,38 +1455,36 @@ def _(
         }
 
         _fig = make_subplots(
-            rows=3,
+            rows=2,
             cols=6,
             specs=[
                 [
-                    {"type": "scene", "colspan": 2},
+                    {"type": "scene", "colspan": 3},
                     None,
-                    {"type": "scene", "colspan": 2},
                     None,
-                    {"type": "scene", "colspan": 2},
+                    {"type": "scene", "colspan": 3},
+                    None,
                     None,
                 ],
-                [{"type": "xy", "colspan": 6}, None, None, None, None, None],
                 [
-                    {"type": "xy", "colspan": 3},
+                    {"type": "xy", "colspan": 2},
                     None,
+                    {"type": "xy", "colspan": 2},
                     None,
-                    {"type": "xy", "colspan": 3},
-                    None,
+                    {"type": "xy", "colspan": 2},
                     None,
                 ],
             ],
             subplot_titles=(
-                "Truth assignment in OC space",
-                "Predicted clusters in OC space",
-                "β in OC space",
-                "",
-                "Event β distribution",
+                f"Truth assignment in OC space ({_projection_label})",
+                f"Predicted clusters in OC space ({_projection_label})",
+                "Event beta distribution",
+                "Truth cluster sizes",
                 "Predicted OC seed sizes",
             ),
-            row_heights=[0.58, 0.19, 0.23],
-            vertical_spacing=0.06,
-            horizontal_spacing=0.085,
+            row_heights=[0.7, 0.3],
+            vertical_spacing=0.08,
+            horizontal_spacing=0.06,
         )
 
         def _marker_size(values):
@@ -1372,7 +1492,9 @@ def _(
 
         def _hover(object_label):
             return (
-                "c1=%{x:.3f}<br>c2=%{y:.3f}<br>c3=%{z:.3f}<br>"
+                f"{_axis_labels[0]}=%{{x:.3f}}<br>"
+                f"{_axis_labels[1]}=%{{y:.3f}}<br>"
+                f"{_axis_labels[2]}=%{{z:.3f}}<br>"
                 "β=%{customdata:.3f}<extra>" + object_label + "</extra>"
             )
 
@@ -1430,7 +1552,7 @@ def _(
                     hovertemplate=_hover("unassigned hits"),
                 ),
                 row=1,
-                col=3,
+                col=4,
             )
 
         for _seed_index in _seed_indices:
@@ -1464,7 +1586,7 @@ def _(
                     hovertemplate=_hover(_label),
                 ),
                 row=1,
-                col=3,
+                col=4,
             )
 
         if len(_seed_indices) > 0:
@@ -1486,35 +1608,8 @@ def _(
                     text=[str(int(seed_index)) for seed_index in _seed_indices],
                 ),
                 row=1,
-                col=3,
+                col=4,
             )
-
-        _fig.add_trace(
-            go.Scatter3d(
-                x=pred_c1,
-                y=pred_c2,
-                z=pred_c3,
-                customdata=_hit_object_id,
-                mode="markers",
-                marker={
-                    "color": _beta,
-                    "colorscale": "Viridis",
-                    "cmin": 0,
-                    "cmax": max(1.0, float(_beta.max())) if _beta.size else 1.0,
-                    "size": 5,
-                    "opacity": 0.82,
-                    "colorbar": {"title": "β", "x": 1.0, "len": 0.48, "y": 0.79},
-                },
-                name="β",
-                showlegend=False,
-                hovertemplate=(
-                    "c1=%{x:.3f}<br>c2=%{y:.3f}<br>c3=%{z:.3f}<br>"
-                    "β=%{marker.color:.3f}<br>object_id=%{customdata}<extra></extra>"
-                ),
-            ),
-            row=1,
-            col=5,
-        )
 
         _bins = np.linspace(0, max(1.0, float(_beta.max())), 40)
         if noise.any():
@@ -1530,7 +1625,7 @@ def _(
                     marker_color="rgba(150,150,150,0.65)",
                     opacity=0.65,
                 ),
-                row=3,
+                row=2,
                 col=1,
             )
         if signal.any():
@@ -1546,7 +1641,7 @@ def _(
                     marker_color="#1f77b4",
                     opacity=0.65,
                 ),
-                row=3,
+                row=2,
                 col=1,
             )
         _fig.add_shape(
@@ -1555,10 +1650,29 @@ def _(
             x1=tbeta,
             y0=0,
             y1=1,
-            xref="x2",
-            yref="y2 domain",
+            xref="x",
+            yref="y domain",
             line={"color": "black", "dash": "dash", "width": 1},
         )
+
+        _truth_labels, _truth_counts = np.unique(signal_ids.astype(int), return_counts=True)
+        if len(_truth_labels) > 0:
+            _truth_order = np.argsort(_truth_counts)[::-1]
+            _truth_labels = _truth_labels[_truth_order]
+            _truth_counts = _truth_counts[_truth_order]
+            _fig.add_trace(
+                go.Bar(
+                    x=[str(int(label)) for label in _truth_labels],
+                    y=_truth_counts,
+                    marker_color=[_truth_colors[int(label)] for label in _truth_labels],
+                    name="Truth object hits",
+                    showlegend=False,
+                    hovertemplate="truth object=%{x}<br>valid hits=%{y}<extra></extra>",
+                ),
+                row=2,
+                col=3,
+            )
+
         _labels, _counts = np.unique(_clustering[_clustering >= 0], return_counts=True)
         _bar_colors = []
         if len(_labels) > 0:
@@ -1578,8 +1692,8 @@ def _(
                     showlegend=False,
                     hovertemplate="seed hit index=%{x}<br>assigned hits=%{y}<extra></extra>",
                 ),
-                row=3,
-                col=4,
+                row=2,
+                col=5,
             )
 
         _truth_entries = truth_object_legend_entries(event, signal_ids, _truth_colors, top_n=10)
@@ -1631,10 +1745,10 @@ def _(
         if not (_matched_entries or _fake_entries or _unassigned.any()):
             _pred_text += "No predicted clusters"
 
-        for _x, _text in [(0.015, _truth_text), (0.44, _pred_text)]:
+        for _x, _text in [(0.015, _truth_text), (0.515, _pred_text)]:
             _fig.add_annotation(
                 x=_x,
-                y=0.49,
+                y=0.43,
                 xref="paper",
                 yref="paper",
                 text=_text,
@@ -1649,15 +1763,12 @@ def _(
                 bgcolor="rgba(255,255,255,0.95)",
             )
 
-        _fig.update_xaxes(visible=False, row=2, col=1)
-        _fig.update_yaxes(visible=False, row=2, col=1)
-
         _display_event_id = getattr(event, "event_id", event_idx)
         _camera = {"eye": {"x": -1 / zoom * 2.35, "y": -1 / zoom * 2.35, "z": 1 / zoom * 2.0}}
         _scene_layout = {
-            "xaxis_title": "c1",
-            "yaxis_title": "c2",
-            "zaxis_title": "c3",
+            "xaxis_title": _axis_labels[0],
+            "yaxis_title": _axis_labels[1],
+            "zaxis_title": _axis_labels[2],
             "aspectmode": "cube",
             "camera": _camera,
         }
@@ -1679,13 +1790,14 @@ def _(
             margin={"l": 35, "r": 35, "t": 90, "b": 35},
             scene=_scene_layout,
             scene2=_scene_layout,
-            scene3=_scene_layout,
             uirevision=f"event-{event_idx}",
         )
-        _fig.update_xaxes(title_text="β", row=3, col=1)
-        _fig.update_yaxes(title_text="Hits", type="log", row=3, col=1)
-        _fig.update_xaxes(title_text="Predicted OC seed hit index", row=3, col=4)
-        _fig.update_yaxes(title_text="Assigned valid hits", row=3, col=4)
+        _fig.update_xaxes(title_text="beta", row=2, col=1)
+        _fig.update_yaxes(title_text="Hits", type="log", row=2, col=1)
+        _fig.update_xaxes(title_text="Truth object id", row=2, col=3)
+        _fig.update_yaxes(title_text="Truth-assigned valid hits", row=2, col=3)
+        _fig.update_xaxes(title_text="Predicted OC seed hit index", row=2, col=5)
+        _fig.update_yaxes(title_text="Assigned valid hits", row=2, col=5)
         return _fig
 
     def event_seed_truth_matches(oc_eval, event_idx):
@@ -1744,12 +1856,157 @@ def _(
             for energy, object_id, particle in entries
         ]
 
+    return apply_truth_colors_to_event_display, plot_true_vs_pred_oc
+
+
+@app.cell
+def _(mo, np, oc_layout, test_ds, val_cluster_coords, val_data):
+    cluster_dim = int(oc_layout.cluster_dim)
+    dim_options = {f"c{i + 1}": i for i in range(cluster_dim)}
+    valid_mask = np.asarray(
+        val_data.get("mask", np.ones(val_cluster_coords.shape[:2], dtype=bool)), dtype=bool
+    )
+    valid_coords = np.asarray(val_cluster_coords, dtype=np.float64)[valid_mask]
+    valid_truth_ids = np.asarray(val_data["hit_object_id"])
+
+    raw_variances = (
+        valid_coords.var(axis=0)
+        if len(valid_coords) > 0
+        else np.zeros(cluster_dim, dtype=np.float64)
+    )
+
+    if len(valid_coords) > 0:
+        pca_mean = valid_coords.mean(axis=0)
+        centered = valid_coords - pca_mean
+        if len(valid_coords) > 1:
+            _, singular_values, vh = np.linalg.svd(centered, full_matrices=False)
+            explained_variance = (singular_values**2) / (len(valid_coords) - 1)
+            components = vh
+        else:
+            explained_variance = np.zeros(cluster_dim, dtype=np.float64)
+            components = np.eye(cluster_dim, dtype=np.float64)
+    else:
+        pca_mean = np.zeros(cluster_dim, dtype=np.float64)
+        explained_variance = np.zeros(cluster_dim, dtype=np.float64)
+        components = np.eye(cluster_dim, dtype=np.float64)
+
+    explained_variance_ratio = (
+        explained_variance / explained_variance.sum()
+        if explained_variance.sum() > 0
+        else np.zeros_like(explained_variance)
+    )
+    positive_evals = explained_variance[explained_variance > 0]
+    if len(positive_evals) > 0:
+        eval_probs = positive_evals / positive_evals.sum()
+        effective_rank = float(np.exp(-(eval_probs * np.log(eval_probs)).sum()))
+        participation_rank = float((positive_evals.sum() ** 2) / np.square(positive_evals).sum())
+    else:
+        effective_rank = 0.0
+        participation_rank = 0.0
+
+    between = np.zeros(cluster_dim, dtype=np.float64)
+    within = np.zeros(cluster_dim, dtype=np.float64)
+    for event_coords, event_truth_ids, event_mask in zip(
+        np.asarray(val_cluster_coords, dtype=np.float64), valid_truth_ids, valid_mask, strict=True
+    ):
+        event_signal_mask = event_mask & (event_truth_ids > 0)
+        if event_signal_mask.sum() < 2:
+            continue
+        event_values = event_coords[event_signal_mask]
+        event_groups = event_truth_ids[event_signal_mask]
+        unique_groups = np.unique(event_groups)
+        if len(unique_groups) < 2:
+            continue
+        global_mean = event_values.mean(axis=0)
+        for group in unique_groups:
+            group_values = event_values[event_groups == group]
+            if len(group_values) == 0:
+                continue
+            group_mean = group_values.mean(axis=0)
+            between += len(group_values) * np.square(group_mean - global_mean)
+            within += np.square(group_values - group_mean).sum(axis=0)
+    separation_scores = np.divide(
+        between,
+        np.maximum(within, 1e-12),
+        out=np.zeros_like(between),
+        where=within > 0,
+    )
+
+    def _top_dim_table(values, title, precision=4, top_n=8):
+        order = np.argsort(values)[::-1][: min(top_n, len(values))]
+        rows = "\n".join(
+            f"| c{int(index) + 1} | {values[index]:.{precision}f} |" for index in order
+        )
+        return f"**{title}**\n\n| Dim | Value |\n| --- | ---: |\n{rows}"
+
+    dims_md = ", ".join(f"`c{i + 1}`" for i in range(cluster_dim))
+    pca_md = ", ".join(
+        f"`PC{i + 1}={explained_variance_ratio[i]:.1%}`"
+        for i in range(min(3, len(explained_variance_ratio)))
+    )
+    diagnostics_md = [
+        mo.md(f"**Available raw OC dims:** {dims_md}"),
+        mo.md(
+            f"**Raw dim:** `{cluster_dim}`  |  **Effective rank:** `{effective_rank:.2f}`  |  **Participation rank:** `{participation_rank:.2f}`"
+        ),
+        mo.md(f"**Validation PCA explained variance:** {pca_md}"),
+    ]
+
     event_idx_selector = mo.ui.number(label="Event Index", start=0, stop=len(test_ds) - 1, step=1)
-    event_idx_selector
+    projection_mode_selector = mo.ui.dropdown(
+        options=["Raw dims", "Validation PCA"],
+        value="Raw dims",
+        label="Display Projection",
+    )
+    x_dim_selector = mo.ui.dropdown(options=dim_options, value="c1", label="X dim")
+    y_dim_selector = mo.ui.dropdown(
+        options=dim_options,
+        value=f"c{min(2, cluster_dim)}",
+        label="Y dim",
+    )
+    z_dim_selector = mo.ui.dropdown(
+        options=dim_options,
+        value=f"c{min(3, cluster_dim)}",
+        label="Z dim",
+    )
+    oc_display_projection = {
+        "mean": pca_mean,
+        "components": components,
+        "explained_variance_ratio": explained_variance_ratio,
+        "effective_rank": effective_rank,
+        "participation_rank": participation_rank,
+        "raw_variances": raw_variances,
+        "separation_scores": separation_scores,
+    }
+
+    mo.vstack(
+        [
+            mo.hstack(
+                [
+                    mo.vstack(diagnostics_md),
+                    mo.md(_top_dim_table(raw_variances, "Top raw variances")),
+                    mo.md(_top_dim_table(separation_scores, "Top truth-separation scores")),
+                ],
+                widths=[0.5, 0.25, 0.25],
+            ),
+            mo.hstack(
+                [
+                    event_idx_selector,
+                    projection_mode_selector,
+                    x_dim_selector,
+                    y_dim_selector,
+                    z_dim_selector,
+                ]
+            ),
+        ]
+    )
     return (
-        apply_truth_colors_to_event_display,
         event_idx_selector,
-        plot_true_vs_pred_oc,
+        oc_display_projection,
+        projection_mode_selector,
+        x_dim_selector,
+        y_dim_selector,
+        z_dim_selector,
     )
 
 
@@ -1759,12 +2016,17 @@ def _(
     event_idx_selector,
     mo,
     mplhep,
+    oc_display_projection,
     oc_eval,
     plot_true_vs_pred_oc,
     plt,
+    projection_mode_selector,
     test_data,
     test_ds,
     test_preds,
+    x_dim_selector,
+    y_dim_selector,
+    z_dim_selector,
 ):
     mo.stop(
         best_oc_thresholds is None,
@@ -1778,6 +2040,9 @@ def _(
         event=test_ds[event_idx_selector.value],
         preds=test_preds,
         hit_object_id=test_data["hit_object_id"],
+        projection_mode=projection_mode_selector.value,
+        raw_dims=(x_dim_selector.value, y_dim_selector.value, z_dim_selector.value),
+        global_pca=oc_display_projection,
         mask=test_data["mask"],
         oc_eval=oc_eval,
         event_idx=event_idx_selector.value,
