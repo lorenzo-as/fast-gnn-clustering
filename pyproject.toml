@@ -36,6 +36,7 @@ dev = [
   "coverage[toml]",
   "deptry",
   "pre-commit>=4.5.1",
+  "matplotlib>=3.10.8",
   "pytest-cov",
   "pytest-xdist",
   "pytest>=8.0",

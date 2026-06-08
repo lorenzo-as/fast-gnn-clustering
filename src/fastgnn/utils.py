@@ -19,3 +19,14 @@ def resolve_project_path(path: str | Path) -> Path:
     if path.is_absolute():
         return path
     return get_project_root() / path
+
+
+PLOTTING_CONFIG = {
+    "figsize": {
+        "A4": {
+            "fullwidth_3pane": (16, 5),
+            "fullwidth_2pane": (16, 7),
+            "halfwidth": (8, 5),
+        }
+    }
+}
