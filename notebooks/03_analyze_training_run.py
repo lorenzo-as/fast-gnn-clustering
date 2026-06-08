@@ -7,11 +7,11 @@
 
 import marimo
 
-__generated_with = "0.23.8"
+__generated_with = "0.23.9"
 app = marimo.App(width="medium")
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _():
     import json
     import os
@@ -133,7 +133,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(COLORS, PLOTTING_CONFIG, config, history, mo, mplhep, np, pl, plt):
     mo.stop(history is None, mo.md("No training history found for this run."))
     train_components_df = pl.DataFrame(history["train_components"])
@@ -459,10 +459,10 @@ def _():
     )
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     threshold_objective_selector = mo.ui.dropdown(
-        options=["matched_f1", "count_median"],
+        options=["matched_f1", "count_median", "count_mean"],
         label="Threshold Objective",
         value="matched_f1",
     )
@@ -541,8 +541,14 @@ def _(
         not start_calibration_button.value,
         mo.md("Select a threshold objective, then click **Start threshold calibration**."),
     )
+
     _tbeta_values = np.linspace(0.001, 0.9, 50)
-    _td_values = np.linspace(0.05, 2.0, 40)
+    _td_values = np.linspace(0.05, 2.0, 50)
+
+    _REFINE_N = 50
+    _REFINE_LOW = 0.75
+    _REFINE_HIGH = 1.25
+
     _progress_title = "Scanning OC thresholds"
     _progress_subtitle = (
         f"{len(_tbeta_values)} beta thresholds x {len(_td_values)} distance thresholds"
@@ -572,7 +578,13 @@ def _(
         "tbeta_values": _float_list(_tbeta_values),
         "td_values": _float_list(_td_values),
         "feature_names": ["x", "y", "z", "energy"],
+        "refinement": {
+            "n_values": _REFINE_N,
+            "low_factor": _REFINE_LOW,
+            "high_factor": _REFINE_HIGH,
+        },
     }
+
     if threshold_objective_selector.value == "matched_f1":
         _calibration_options["matching"] = {
             "algorithm": matching_algorithm_selector.value,
@@ -583,6 +595,7 @@ def _(
                 hungarian_energy_ratio_log_weight_selector.value
             ),
         }
+
     _cache_path = selected_run_dir / "oc_threshold_calibrations.json"
     _cache = _read_cache(_cache_path)
     _cached_record = next(
@@ -594,14 +607,14 @@ def _(
         None,
     )
 
-    if _cached_record is None:
-        best_oc_thresholds, _grid_results = grid_search_thresholds(
+    def _run_grid_search(tbeta_values, td_values, title, subtitle):
+        return grid_search_thresholds(
             beta=val_beta,
             cluster_coords=val_cluster_coords,
             hit_object_id=val_data["hit_object_id"],
             mask=val_data.get("mask", None),
-            tbeta_values=_tbeta_values,
-            td_values=_td_values,
+            tbeta_values=tbeta_values,
+            td_values=td_values,
             objective=threshold_objective_selector.value,
             features=val_eval_data["features"],
             feature_names=["x", "y", "z", "energy"],
@@ -612,11 +625,47 @@ def _(
             hungarian_energy_ratio_log_weight=hungarian_energy_ratio_log_weight_selector.value,
             progress=lambda values: mo.status.progress_bar(
                 values,
-                title=_progress_title,
-                subtitle=_progress_subtitle,
+                title=title,
+                subtitle=subtitle,
                 completion_title="OC threshold calibration complete",
             ),
         )
+
+    if _cached_record is None:
+        # Pass 1: coarse scan
+        _coarse_best, _ = _run_grid_search(
+            _tbeta_values,
+            _td_values,
+            title=_progress_title,
+            subtitle=_progress_subtitle,
+        )
+
+        # Pass 2: refined scan — 50 values in [0.75x, 1.25x] around each coarse best
+        _best_tbeta = _coarse_best["tbeta"]
+        _best_td = _coarse_best["td"]
+
+        _fine_tbeta_values = np.linspace(
+            max(_REFINE_LOW * _best_tbeta, 1e-4),
+            min(_REFINE_HIGH * _best_tbeta, 1.0),
+            _REFINE_N,
+        )
+        _fine_td_values = np.linspace(
+            max(_REFINE_LOW * _best_td, 1e-4),
+            _REFINE_HIGH * _best_td,
+            _REFINE_N,
+        )
+        _fine_subtitle = (
+            f"{_REFINE_N} beta thresholds x {_REFINE_N} distance thresholds "
+            f"(refined around tbeta={_best_tbeta:.4f}, td={_best_td:.4f})"
+        )
+
+        best_oc_thresholds, _grid_results = _run_grid_search(
+            _fine_tbeta_values,
+            _fine_td_values,
+            title="Refining OC thresholds",
+            subtitle=_fine_subtitle,
+        )
+
         _record = {
             "calibration_options": _calibration_options,
             "best_thresholds": {
@@ -627,7 +676,7 @@ def _(
         }
         _cache["records"].append(_record)
         _write_cache(_cache_path, _cache)
-        _status = "Computed threshold calibration and wrote cache."
+        _status = "Computed threshold calibration (coarse + refined) and wrote cache."
     else:
         best_oc_thresholds = _cached_record["best_thresholds"]
         _status = "Loaded threshold calibration from cache."
@@ -681,7 +730,7 @@ def _(
     return (oc_eval,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(PRJ_ROOT, mo, selected_run_dir):
     default_path = (
         PRJ_ROOT / "plotting" / "efficiency_fake_rate" / f"{selected_run_dir.name}_oc_eval.pkl"
@@ -701,7 +750,7 @@ def _(PRJ_ROOT, mo, selected_run_dir):
     return oc_eval_pickle_path, save_oc_eval_button
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(
     PRJ_ROOT,
     Path,
@@ -732,14 +781,14 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _():
     from fastgnn.plotting import plot_binned_efficiency, plot_binned_fake_rate
 
     return plot_binned_efficiency, plot_binned_fake_rate
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(
     PLOTTING_CONFIG,
     binned_efficiency,
@@ -763,7 +812,7 @@ def _(
 
     threshold = test_ds.metadata["preprocessing"]["truth_min_object_energy"]
 
-    _pred_energy = oc_eval.predicted["assigned_cluster_energy"]
+    _pred_energy = oc_eval.predicted["energy_pred"]
     _bins_pred = np.concatenate(
         [
             log_edges(
@@ -776,7 +825,7 @@ def _(
 
     _pred_energy_table = binned_fake_rate(
         oc_eval.predicted,
-        "assigned_cluster_energy",
+        "energy_pred",
         _bins_pred,
     )
 
@@ -817,7 +866,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(
     PLOTTING_CONFIG,
     binned_efficiency,
@@ -832,14 +881,14 @@ def _(
 
     for _ax, _col, _xlabel, _metric, _frame, _bin_values in zip(
         _axs,
-        ["truth_n_hits", "cluster_size", "seed_beta"],
+        ["n_hits_truth", "n_hits_pred", "beta_seed"],
         ["True cluster size", "Predicted cluster size", r"$\beta$ score of OC seed"],
         ["efficiency", "fake_rate", "fake_rate"],
         [oc_eval.truth, oc_eval.predicted, oc_eval.predicted],
         [
-            oc_eval.truth["truth_n_hits"],
-            oc_eval.predicted["cluster_size"],
-            oc_eval.predicted["seed_beta"],
+            oc_eval.truth["n_hits_truth"],
+            oc_eval.predicted["n_hits_pred"],
+            oc_eval.predicted["beta_seed"],
         ],
     ):
         _bins = log_edges(_bin_values)
@@ -873,7 +922,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(itertools, np, pl):
     REFERENCE_LINE_KWARGS = {"color": "green", "linestyle": "--"}
 
@@ -971,7 +1020,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     show_median_response = mo.ui.checkbox(
         label="Show median response in profile plots", value=False
@@ -980,7 +1029,7 @@ def _(mo):
     return (show_median_response,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(
     PLOTTING_CONFIG,
     REFERENCE_LINE_KWARGS,
@@ -1085,7 +1134,10 @@ def _(
         (_axs[1], "et", "E_{T,"),
     ]:
         _truth, _pred = (
-            oc_eval.matches.select(f"truth_{_en}", f"sum_{_en}_reco").drop_nulls().to_numpy().T
+            oc_eval.matches.select(f"truth_{_en}", "sum_et_reco" if _en == "et" else "energy_pred")
+            .drop_nulls()
+            .to_numpy()
+            .T
         )
         _truth_et_all = oc_eval.truth.select(f"truth_{_en}").drop_nulls().to_numpy()
         _et_bins = log_edges(_truth_et_all)
@@ -1122,7 +1174,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(PLOTTING_CONFIG, energy_weighted_str, oc_eval, plt):
     _fig1, _axs = plt.subplots(
         nrows=1,
@@ -1168,7 +1220,7 @@ def _(PLOTTING_CONFIG, energy_weighted_str, oc_eval, plt):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(
     PLOTTING_CONFIG,
     REFERENCE_LINE_KWARGS,
@@ -1215,7 +1267,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(
     REFERENCE_LINE_KWARGS,
     best_oc_thresholds,
@@ -1283,7 +1335,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(
     count_clusters_from_labels,
     count_truth_objects,
@@ -1399,6 +1451,8 @@ def _(
         raw_dims,
         global_pca,
         mask=None,
+        eval_features=None,
+        eval_feature_names=None,
         oc_eval=None,
         event_idx=0,
     ):
@@ -1423,6 +1477,15 @@ def _(
         pred_c3 = _display_coords[:, 2]
 
         _hit_object_id = _hit_object_id[m]
+        _hit_observables = event_hit_observables(
+            event,
+            event_idx,
+            m,
+            eval_features=eval_features,
+            eval_feature_names=eval_feature_names,
+        )
+        _hit_energy = _hit_observables["energy"]
+        _hit_et = _hit_observables["et"]
         signal = _hit_object_id > 0
         noise = ~signal
         signal_ids = _hit_object_id[signal]
@@ -1455,7 +1518,7 @@ def _(
         }
 
         _fig = make_subplots(
-            rows=2,
+            rows=5,
             cols=6,
             specs=[
                 [
@@ -1474,6 +1537,30 @@ def _(
                     {"type": "xy", "colspan": 2},
                     None,
                 ],
+                [
+                    {"type": "xy", "colspan": 2},
+                    None,
+                    {"type": "xy", "colspan": 2},
+                    None,
+                    {"type": "xy", "colspan": 2},
+                    None,
+                ],
+                [
+                    {"type": "xy", "colspan": 2},
+                    None,
+                    {"type": "xy", "colspan": 2},
+                    None,
+                    {"type": "xy", "colspan": 2},
+                    None,
+                ],
+                [
+                    {"type": "table", "colspan": 6},
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
             ],
             subplot_titles=(
                 f"Truth assignment in OC space ({_projection_label})",
@@ -1481,9 +1568,16 @@ def _(
                 "Event beta distribution",
                 "Truth cluster sizes",
                 "Predicted OC seed sizes",
+                "Pred / truth ET",
+                "Truth ET recovered",
+                "Pred ET purity",
+                "Event ET accounting",
+                "Purity",
+                "Completeness",
+                "Truth object match summary",
             ),
-            row_heights=[0.7, 0.3],
-            vertical_spacing=0.08,
+            row_heights=[0.44, 0.16, 0.13, 0.13, 0.14],
+            vertical_spacing=0.065,
             horizontal_spacing=0.06,
         )
 
@@ -1672,6 +1766,30 @@ def _(
                 row=2,
                 col=3,
             )
+        _summary_order = [int(label) for label in _truth_labels]
+        _truth_match_rows = event_truth_match_summary(
+            oc_eval,
+            event_idx,
+            _summary_order,
+            hit_object_id=_hit_object_id,
+            clustering=_clustering,
+            hit_et=_hit_et,
+        )
+        _match_table_rows = _truth_match_rows + event_fake_cluster_rows(oc_eval, event_idx)
+        _truth_match_by_object = {int(row["object_id"]): row for row in _truth_match_rows}
+        _energy_accounting = event_energy_accounting(
+            hit_et=_hit_et,
+            hit_object_id=_hit_object_id,
+            clustering=_clustering,
+            truth_match_rows=_truth_match_rows,
+            oc_eval=oc_eval,
+            event_idx=event_idx,
+        )
+        _pred_energy_closure = (
+            _energy_accounting["matched_pred_energy"]
+            + _energy_accounting["fake_pred_energy"]
+            + _energy_accounting["unassigned_hit_energy"]
+        )
 
         _labels, _counts = np.unique(_clustering[_clustering >= 0], return_counts=True)
         _bar_colors = []
@@ -1695,6 +1813,142 @@ def _(
                 row=2,
                 col=5,
             )
+
+        def _metric_values(name):
+            return [
+                100.0 * float(_truth_match_by_object.get(object_id, {}).get(name) or 0.0)
+                for object_id in _summary_order
+            ]
+
+        def _ratio_values(name):
+            return [
+                float(_truth_match_by_object.get(object_id, {}).get(name) or 0.0)
+                for object_id in _summary_order
+            ]
+
+        def _add_truth_metric_bar(name, title, row, col):
+            if len(_summary_order) == 0:
+                return
+            _fig.add_trace(
+                go.Bar(
+                    x=[str(object_id) for object_id in _summary_order],
+                    y=_metric_values(name),
+                    marker_color=[_truth_colors[object_id] for object_id in _summary_order],
+                    name=title,
+                    showlegend=False,
+                    hovertemplate=("truth object=%{x}<br>" + title + "=%{y:.1f}%<extra></extra>"),
+                ),
+                row=row,
+                col=col,
+            )
+
+        if len(_summary_order) > 0:
+            _fig.add_trace(
+                go.Bar(
+                    x=[str(object_id) for object_id in _summary_order],
+                    y=_ratio_values("pred_over_truth_et"),
+                    marker_color=[_truth_colors[object_id] for object_id in _summary_order],
+                    name="Pred / truth ET",
+                    showlegend=False,
+                    hovertemplate=(
+                        "truth object=%{x}<br>ET_pred / ET_true=%{y:.3g}<extra></extra>"
+                    ),
+                ),
+                row=3,
+                col=1,
+            )
+
+        _add_truth_metric_bar("et_recovered_fraction", "Truth ET recovered", 3, 3)
+        _add_truth_metric_bar("et_assigned_fraction", "Pred ET purity", 3, 5)
+        _add_truth_metric_bar("purity", "Purity", 4, 3)
+        _add_truth_metric_bar("completeness", "Completeness", 4, 5)
+
+        _fig.add_trace(
+            go.Bar(
+                x=[
+                    "Valid hits ET",
+                    "Signal truth ET",
+                    "Noise",
+                    "Matched pred ET",
+                    "Fake pred ET",
+                    "Unassigned",
+                ],
+                y=[
+                    _energy_accounting["valid_hit_energy"],
+                    _energy_accounting["signal_hit_energy"],
+                    _energy_accounting["noise_hit_energy"],
+                    _energy_accounting["matched_pred_energy"],
+                    _energy_accounting["fake_pred_energy"],
+                    _energy_accounting["unassigned_hit_energy"],
+                ],
+                marker_color=[
+                    "#6b6b6b",
+                    "#1f77b4",
+                    "rgba(150,150,150,0.75)",
+                    "#2ca02c",
+                    "#d62728",
+                    "#bca875",
+                ],
+                text=[
+                    f"{_energy_accounting['valid_hit_energy']:.3g} GeV",
+                    f"{_energy_accounting['signal_hit_energy']:.3g} GeV<br>{_energy_accounting['signal_energy_fraction']:.1f}%",
+                    f"{_energy_accounting['noise_hit_energy']:.3g} GeV",
+                    f"{_energy_accounting['matched_pred_energy']:.3g} GeV",
+                    f"{_energy_accounting['fake_pred_energy']:.3g} GeV",
+                    f"{_energy_accounting['unassigned_hit_energy']:.3g} GeV<br>{_energy_accounting['unassigned_energy_fraction']:.1f}%",
+                ],
+                textposition="auto",
+                name="Event ET accounting",
+                showlegend=False,
+                hovertemplate=(
+                    "%{x}<br>energy=%{y:.3g} GeV<br>"
+                    f"pred+unassigned closure={_pred_energy_closure:.3g} GeV"
+                    "<extra></extra>"
+                ),
+            ),
+            row=4,
+            col=1,
+        )
+
+        _table_columns = [
+            ("object_id", "object / fake cluster"),
+            ("matched", "matched"),
+            ("truth_energy", "E_true hits [GeV]"),
+            ("energy_pred", "E_pred [GeV]"),
+            ("truth_et", "ET_true hits [GeV]"),
+            ("et_pred", "ET_pred [GeV]"),
+            ("recovered_energy", "E_recovered [GeV]"),
+            ("recovered_et", "ET_recovered [GeV]"),
+            ("n_hits_truth", "n_hits true"),
+            ("n_hits_pred", "n_hits pred"),
+            ("purity", "hit purity"),
+            ("completeness", "hit completeness"),
+            ("et_recovered_fraction", "ET recovered"),
+            ("et_assigned_fraction", "pred ET purity"),
+            ("beta_max", "beta max"),
+            ("nearest_truth_dist", "nearest truth dist"),
+        ]
+        _fig.add_trace(
+            go.Table(
+                header={
+                    "values": [label for _, label in _table_columns],
+                    "align": "left",
+                    "fill_color": "#f2f2f2",
+                    "font": {"size": 11},
+                },
+                cells={
+                    "values": [
+                        [format_match_table_value(row.get(key)) for row in _match_table_rows]
+                        for key, _ in _table_columns
+                    ],
+                    "align": "left",
+                    "height": 24,
+                    "font": {"size": 10},
+                },
+            ),
+            row=5,
+            col=1,
+        )
 
         _truth_entries = truth_object_legend_entries(event, signal_ids, _truth_colors, top_n=10)
         _truth_entries = [
@@ -1745,15 +1999,15 @@ def _(
         if not (_matched_entries or _fake_entries or _unassigned.any()):
             _pred_text += "No predicted clusters"
 
-        for _x, _text in [(0.015, _truth_text), (0.515, _pred_text)]:
+        for _x, _text in [(0.49, _truth_text), (0.985, _pred_text)]:
             _fig.add_annotation(
                 x=_x,
-                y=0.43,
+                y=0.92,
                 xref="paper",
                 yref="paper",
                 text=_text,
                 showarrow=False,
-                xanchor="left",
+                xanchor="right",
                 yanchor="top",
                 align="left",
                 font={"size": 11},
@@ -1783,7 +2037,7 @@ def _(
                 "xanchor": "left",
             },
             template="plotly_white",
-            height=1080,
+            height=1550,
             autosize=True,
             barmode="overlay",
             legend={"orientation": "h", "y": -0.06, "x": 0},
@@ -1798,6 +2052,18 @@ def _(
         _fig.update_yaxes(title_text="Truth-assigned valid hits", row=2, col=3)
         _fig.update_xaxes(title_text="Predicted OC seed hit index", row=2, col=5)
         _fig.update_yaxes(title_text="Assigned valid hits", row=2, col=5)
+        _fig.update_xaxes(title_text="Truth object id", row=3, col=1)
+        _fig.update_yaxes(title_text=r"ET_pred / ET_true", rangemode="tozero", row=3, col=1)
+        _fig.update_xaxes(title_text="Truth object id", row=3, col=3)
+        _fig.update_yaxes(title_text="ET recovered [%]", range=[0, 105], row=3, col=3)
+        _fig.update_xaxes(title_text="Truth object id", row=3, col=5)
+        _fig.update_yaxes(title_text="ET purity [%]", range=[0, 105], row=3, col=5)
+        _fig.update_xaxes(title_text="", row=4, col=1)
+        _fig.update_yaxes(title_text="ET [GeV]", rangemode="tozero", row=4, col=1)
+        _fig.update_xaxes(title_text="Truth object id", row=4, col=3)
+        _fig.update_yaxes(title_text="Purity [%]", range=[0, 105], row=4, col=3)
+        _fig.update_xaxes(title_text="Truth object id", row=4, col=5)
+        _fig.update_yaxes(title_text="Completeness [%]", range=[0, 105], row=4, col=5)
         return _fig
 
     def event_seed_truth_matches(oc_eval, event_idx):
@@ -1809,10 +2075,259 @@ def _(
             if int(row.get("event_idx", -1)) == int(event_idx)
         ]
         return {
-            int(row["seed_index"]): int(row["truth_id"])
+            int(row["seed_hit_idx"]): int(row["object_id"])
             for row in rows
-            if row.get("seed_index") is not None and row.get("truth_id") is not None
+            if row.get("seed_hit_idx") is not None and row.get("object_id") is not None
         }
+
+    def event_table_rows(frame, event_idx):
+        if frame is None or frame.is_empty():
+            return []
+        return [row for row in frame.to_dicts() if int(row.get("event_idx", -1)) == int(event_idx)]
+
+    def event_hit_observables(
+        event,
+        event_idx,
+        valid_mask,
+        *,
+        eval_features=None,
+        eval_feature_names=None,
+    ):
+        if eval_features is not None and eval_feature_names is not None:
+            feature_names = list(eval_feature_names)
+            energy = np.asarray(
+                eval_features[event_idx, :, feature_names.index("energy")], dtype=np.float64
+            )[valid_mask]
+            x = np.asarray(eval_features[event_idx, :, feature_names.index("x")], dtype=np.float64)[
+                valid_mask
+            ]
+            y = np.asarray(eval_features[event_idx, :, feature_names.index("y")], dtype=np.float64)[
+                valid_mask
+            ]
+            z = np.asarray(eval_features[event_idx, :, feature_names.index("z")], dtype=np.float64)[
+                valid_mask
+            ]
+        else:
+            energy = np.asarray(event.hits.energy, dtype=np.float64)
+            x = np.asarray(event.hits.x, dtype=np.float64)
+            y = np.asarray(event.hits.y, dtype=np.float64)
+            z = np.asarray(event.hits.z, dtype=np.float64)
+            if len(energy) == len(valid_mask):
+                energy, x, y, z = energy[valid_mask], x[valid_mask], y[valid_mask], z[valid_mask]
+            elif len(energy) >= int(valid_mask.sum()):
+                n_valid = int(valid_mask.sum())
+                energy, x, y, z = energy[:n_valid], x[:n_valid], y[:n_valid], z[:n_valid]
+            else:
+                raise ValueError(
+                    "Cannot align event hit observables to the padded mask. Pass eval_features "
+                    "with unnormalized 'x', 'y', 'z', and 'energy' features."
+                )
+
+        from fastgnn.geometry import xyz_to_eta_phi
+
+        eta, _ = xyz_to_eta_phi(x, y, z)
+        return {"energy": energy, "et": energy / np.cosh(eta)}
+
+    def event_energy_accounting(
+        *,
+        hit_et,
+        hit_object_id,
+        clustering,
+        truth_match_rows,
+        oc_eval,
+        event_idx,
+    ):
+        pred_rows = event_table_rows(None if oc_eval is None else oc_eval.predicted, event_idx)
+        hit_et = np.asarray(hit_et, dtype=np.float64)
+        total = float(hit_et.sum())
+        signal = float(hit_et[hit_object_id > 0].sum())
+        noise = float(hit_et[hit_object_id == 0].sum())
+        assigned = float(hit_et[clustering >= 0].sum())
+        unassigned = float(hit_et[clustering < 0].sum())
+        matched_pred = sum(
+            float(row["sum_et_reco"])
+            for row in pred_rows
+            if row.get("matched") and row.get("sum_et_reco") is not None
+        )
+        fake_pred = sum(
+            float(row["sum_et_reco"])
+            for row in pred_rows
+            if row.get("fake") and row.get("sum_et_reco") is not None
+        )
+        recovered = sum(
+            float(row["recovered_et"])
+            for row in truth_match_rows
+            if row.get("recovered_et") is not None
+        )
+        return {
+            "valid_hit_energy": total,
+            "signal_hit_energy": signal,
+            "noise_hit_energy": noise,
+            "assigned_hit_energy": assigned,
+            "unassigned_hit_energy": unassigned,
+            "matched_pred_energy": matched_pred,
+            "fake_pred_energy": fake_pred,
+            "recovered_matched_energy": recovered,
+            "signal_energy_fraction": 100.0 * signal / total if total > 0 else 0.0,
+            "assigned_energy_fraction": 100.0 * assigned / total if total > 0 else 0.0,
+            "unassigned_energy_fraction": 100.0 * unassigned / total if total > 0 else 0.0,
+            "recovered_energy_fraction": 100.0 * recovered / total if total > 0 else 0.0,
+        }
+
+    def event_truth_match_summary(
+        oc_eval,
+        event_idx,
+        object_order,
+        *,
+        hit_object_id,
+        clustering,
+        hit_et,
+    ):
+        if oc_eval is None:
+            return []
+        truth_rows = event_table_rows(oc_eval.truth, event_idx)
+        match_rows = event_table_rows(oc_eval.matches, event_idx)
+        pred_rows = event_table_rows(oc_eval.predicted, event_idx)
+        match_by_object = {int(row["object_id"]): row for row in match_rows}
+        pred_by_cluster = {int(row["cluster_id_pred"]): row for row in pred_rows}
+
+        ordered_object_ids = list(object_order)
+        remaining_object_ids = sorted(
+            int(row["object_id"])
+            for row in truth_rows
+            if int(row["object_id"]) not in ordered_object_ids
+        )
+        ordered_object_ids.extend(remaining_object_ids)
+        truth_by_object = {int(row["object_id"]): row for row in truth_rows}
+
+        rows = []
+        for object_id in ordered_object_ids:
+            truth_row = truth_by_object.get(object_id)
+            if truth_row is None:
+                continue
+            match_row = match_by_object.get(object_id)
+            pred_row = (
+                None
+                if match_row is None
+                else pred_by_cluster.get(int(match_row["cluster_id_pred"]))
+            )
+            truth_ref_energy = truth_row.get("truth_energy")
+            truth_sum_energy = (
+                match_row.get("truth_sum_energy")
+                if match_row is not None
+                else truth_row.get("truth_sum_energy", truth_ref_energy)
+            )
+            truth_energy = truth_sum_energy
+            pred_energy = None if pred_row is None else pred_row.get("energy_pred")
+            truth_et = truth_row.get("truth_et")
+            pred_et = None if pred_row is None else pred_row.get("sum_et_reco")
+            seed_hit_idx = None if match_row is None else int(match_row["seed_hit_idx"])
+            recovered_et = None
+            if seed_hit_idx is not None:
+                overlap_mask = (hit_object_id == object_id) & (clustering == seed_hit_idx)
+                recovered_et = float(np.asarray(hit_et, dtype=np.float64)[overlap_mask].sum())
+            pred_over_truth_et = (
+                None
+                if pred_et is None or truth_et in (None, 0)
+                else float(pred_et) / float(truth_et)
+            )
+            energy_recovered_fraction = (
+                None if match_row is None else match_row.get("energy_recovered_fraction")
+            )
+            et_recovered_fraction = (
+                None
+                if recovered_et is None or truth_et in (None, 0)
+                else float(recovered_et) / float(truth_et)
+            )
+            et_assigned_fraction = (
+                None
+                if recovered_et is None or pred_et in (None, 0)
+                else float(recovered_et) / float(pred_et)
+            )
+            recovered_energy = (
+                None
+                if energy_recovered_fraction is None or truth_sum_energy is None
+                else float(energy_recovered_fraction) * float(truth_sum_energy)
+            )
+            rows.append(
+                {
+                    "object_id": object_id,
+                    "truth_energy": truth_energy,
+                    "truth_ref_energy": truth_ref_energy,
+                    "truth_sum_energy": truth_sum_energy,
+                    "truth_et": truth_et,
+                    "n_hits_truth": truth_row.get("n_hits_truth"),
+                    "nearest_truth_dist": truth_row.get("nearest_truth_dist"),
+                    "beta_max": truth_row.get("beta_max"),
+                    "matched": bool(truth_row.get("matched", False)),
+                    "n_hits_pred": None if pred_row is None else pred_row.get("n_hits_pred"),
+                    "energy_pred": pred_energy,
+                    "et_pred": pred_et,
+                    "pred_over_truth_et": pred_over_truth_et,
+                    "recovered_energy": recovered_energy,
+                    "recovered_et": recovered_et,
+                    "purity": None if match_row is None else match_row.get("purity"),
+                    "completeness": None if match_row is None else match_row.get("completeness"),
+                    "energy_recovered_fraction": energy_recovered_fraction,
+                    "et_recovered_fraction": et_recovered_fraction,
+                    "et_assigned_fraction": et_assigned_fraction,
+                    "energy_assigned_fraction": None
+                    if match_row is None
+                    else match_row.get("energy_assigned_fraction"),
+                }
+            )
+        return rows
+
+    def event_fake_cluster_rows(oc_eval, event_idx):
+        if oc_eval is None:
+            return []
+        pred_rows = event_table_rows(oc_eval.predicted, event_idx)
+        fake_rows = [
+            row
+            for row in pred_rows
+            if bool(row.get("fake", False)) and not bool(row.get("matched", False))
+        ]
+        fake_rows = sorted(
+            fake_rows,
+            key=lambda row: (
+                int(row.get("seed_hit_idx", -1))
+                if row.get("seed_hit_idx") is not None
+                else int(row.get("cluster_id_pred", -1))
+            ),
+        )
+        return [
+            {
+                "object_id": f"fakecluster seed {int(row['seed_hit_idx'])}",
+                "matched": False,
+                "truth_energy": None,
+                "energy_pred": row.get("energy_pred"),
+                "truth_et": None,
+                "et_pred": row.get("sum_et_reco"),
+                "recovered_et": None,
+                "n_hits_truth": None,
+                "n_hits_pred": row.get("n_hits_pred"),
+                "purity": None,
+                "completeness": None,
+                "et_recovered_fraction": None,
+                "et_assigned_fraction": None,
+                "beta_max": None,
+                "nearest_truth_dist": None,
+            }
+            for row in fake_rows
+        ]
+
+    def format_match_table_value(value):
+        if value is None:
+            return "None"
+        if isinstance(value, (bool, np.bool_)):
+            return str(bool(value))
+        if isinstance(value, (int, np.integer)):
+            return str(int(value))
+        if isinstance(value, (float, np.floating)):
+            if not np.isfinite(value):
+                return "None"
+            return f"{float(value):.3g}"
+        return str(value)
 
     def add_seed_arrow_to_truth_description(description, seed_index):
         if seed_index is None:
@@ -1859,7 +2374,7 @@ def _(
     return apply_truth_colors_to_event_display, plot_true_vs_pred_oc
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo, np, oc_layout, test_ds, val_cluster_coords, val_data):
     cluster_dim = int(oc_layout.cluster_dim)
     dim_options = {f"c{i + 1}": i for i in range(cluster_dim)}
@@ -2023,6 +2538,7 @@ def _(
     projection_mode_selector,
     test_data,
     test_ds,
+    test_eval_data,
     test_preds,
     x_dim_selector,
     y_dim_selector,
@@ -2044,6 +2560,8 @@ def _(
         raw_dims=(x_dim_selector.value, y_dim_selector.value, z_dim_selector.value),
         global_pca=oc_display_projection,
         mask=test_data["mask"],
+        eval_features=test_eval_data["features"],
+        eval_feature_names=["x", "y", "z", "energy"],
         oc_eval=oc_eval,
         event_idx=event_idx_selector.value,
     )
@@ -2052,7 +2570,7 @@ def _(
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(apply_truth_colors_to_event_display, event_idx_selector, mo, test_ds):
     from fastgnn.data.cmssw.plotting import plot_event
 
