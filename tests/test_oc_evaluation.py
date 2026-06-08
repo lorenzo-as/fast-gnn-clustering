@@ -7,6 +7,7 @@ from fastgnn.evaluation.oc_metrics import (
     binned_efficiency,
     binned_fake_rate,
     evaluate_oc_padded,
+    grid_search_thresholds,
 )
 from fastgnn.training.oc_outputs import OCOutputLayout, split_oc_outputs
 
@@ -202,6 +203,111 @@ def test_binned_efficiency_uses_zero_interval_for_empty_bins() -> None:
     assert efficiency["n"].to_list() == [0, 1]
     assert efficiency["efficiency_confidence_low"].to_list()[0] == 0.0
     assert efficiency["efficiency_confidence_high"].to_list()[0] == 0.0
+
+
+def test_grid_search_count_median_preserves_legacy_selector() -> None:
+    beta = np.array([[0.9, 0.8, 0.7]], dtype=np.float64)
+    coords = np.array([[[0.0, 0.0], [0.1, 0.0], [10.0, 0.0]]], dtype=np.float64)
+    labels = np.array([[1, 1, 2]], dtype=np.int32)
+    mask = np.ones_like(labels, dtype=bool)
+    progress_calls = []
+
+    def record_progress(values):
+        progress_calls.append(len(values))
+        return values
+
+    best, table = grid_search_thresholds(
+        beta=beta,
+        cluster_coords=coords,
+        hit_object_id=labels,
+        mask=mask,
+        tbeta_values=np.array([0.5]),
+        td_values=np.array([0.2, 20.0]),
+        objective="count_median",
+        progress=record_progress,
+    )
+
+    assert best["tbeta"] == 0.5
+    assert best["td"] == 0.2
+    assert best["median_abs_diff"] == 0.0
+    assert "score" not in table.columns
+    assert progress_calls == [1]
+
+
+def test_grid_search_matched_f1_scores_perfect_threshold() -> None:
+    beta = np.array([[0.9, 0.8]], dtype=np.float64)
+    coords = np.array([[[0.0, 0.0], [10.0, 0.0]]], dtype=np.float64)
+    labels = np.array([[1, 2]], dtype=np.int32)
+    mask = np.ones_like(labels, dtype=bool)
+    features = np.array([[[10.0, 0.0, 100.0, 10.0], [30.0, 0.0, 100.0, 30.0]]])
+
+    best, table = grid_search_thresholds(
+        beta=beta,
+        cluster_coords=coords,
+        hit_object_id=labels,
+        mask=mask,
+        tbeta_values=np.array([0.5]),
+        td_values=np.array([0.5]),
+        objective="matched_f1",
+        features=features,
+        feature_names=["x", "y", "z", "energy"],
+        max_match_distance=1.0,
+        min_energy_ratio=0.5,
+        max_energy_ratio=2.0,
+        f1_epsilon=0.0,
+    )
+
+    row = table.row(0, named=True)
+    assert best["score"] == 1.5
+    assert row["epsilon_obj"] == 1.0
+    assert row["p_obj"] == 1.0
+    assert row["epsilon_E"] == 1.0
+    assert row["p_E"] == 1.0
+    assert row["f1_obj"] == 1.0
+    assert row["f1_E"] == 1.0
+
+
+def test_grid_search_matched_f1_weights_high_energy_matches() -> None:
+    beta = np.array([[0.9, 0.4]], dtype=np.float64)
+    coords = np.array([[[0.0, 0.0], [10.0, 0.0]]], dtype=np.float64)
+    labels = np.array([[1, 2]], dtype=np.int32)
+    mask = np.ones_like(labels, dtype=bool)
+    features = np.array([[[10.0, 0.0, 100.0, 1000.0], [30.0, 0.0, 100.0, 1.0]]])
+
+    _, table = grid_search_thresholds(
+        beta=beta,
+        cluster_coords=coords,
+        hit_object_id=labels,
+        mask=mask,
+        tbeta_values=np.array([0.5]),
+        td_values=np.array([0.5]),
+        objective="matched_f1",
+        features=features,
+        feature_names=["x", "y", "z", "energy"],
+        max_match_distance=1.0,
+        min_energy_ratio=0.5,
+        max_energy_ratio=2.0,
+        f1_epsilon=0.0,
+    )
+
+    row = table.row(0, named=True)
+    assert row["epsilon_obj"] == 0.5
+    assert row["epsilon_E"] > 0.98
+    assert row["f1_E"] > row["f1_obj"]
+    assert row["score"] > row["f1_obj"]
+
+
+def test_grid_search_matched_f1_requires_evaluation_features() -> None:
+    with pytest.raises(ValueError, match="requires unnormalized evaluation features"):
+        grid_search_thresholds(
+            beta=np.array([[0.9]], dtype=np.float64),
+            cluster_coords=np.array([[[0.0, 0.0]]], dtype=np.float64),
+            hit_object_id=np.array([[1]], dtype=np.int32),
+            mask=np.array([[True]]),
+            tbeta_values=np.array([0.5]),
+            td_values=np.array([0.5]),
+            objective="matched_f1",
+        )
 
 
 def test_hungarian_matching_can_penalize_energy_ratio_log_distance() -> None:
