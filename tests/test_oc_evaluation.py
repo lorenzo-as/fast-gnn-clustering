@@ -165,7 +165,7 @@ def test_oc_evaluation_seed_matching_by_xyz_distance_and_binned_rates() -> None:
         np.linalg.norm(expected_pred2_xyz - expected_truth2_xyz),
     ]
 
-    matches = evaluation.matches.sort("truth_id")
+    matches = evaluation.matches.sort("object_id")
     np.testing.assert_allclose(
         matches["centroid_distance"].to_numpy(),
         expected_distances,
@@ -175,7 +175,7 @@ def test_oc_evaluation_seed_matching_by_xyz_distance_and_binned_rates() -> None:
     np.testing.assert_allclose(matches["energy_response"].to_numpy(), [5.0 / 6.0, 1.0])
     np.testing.assert_allclose(matches["model_energy_reco"].to_numpy(), [6.1, 9.5])
 
-    predicted = evaluation.predicted.sort("pred_id")
+    predicted = evaluation.predicted.sort("cluster_id_pred")
     assert predicted["fake"].to_list() == [False, False, True, True]
     assert predicted["model_x_reco"].to_list()[0] == 0.0
     np.testing.assert_allclose(predicted["centroid_x_reco"].to_list()[0], expected_pred1_xyz[0])
@@ -183,9 +183,7 @@ def test_oc_evaluation_seed_matching_by_xyz_distance_and_binned_rates() -> None:
     assert "sum_x_reco" not in predicted.columns
 
     efficiency = binned_efficiency(evaluation.truth, "truth_energy", np.array([0.0, 5.0, 20.0]))
-    fake_rate = binned_fake_rate(
-        evaluation.predicted, "assigned_cluster_energy", np.array([0.0, 2.0, 20.0])
-    )
+    fake_rate = binned_fake_rate(evaluation.predicted, "energy_pred", np.array([0.0, 2.0, 20.0]))
     assert efficiency["efficiency"].to_list() == [0.0, 1.0]
     assert fake_rate["fake_rate"].to_list() == [1.0, 1.0 / 3.0]
     assert efficiency["efficiency_confidence_low"].to_list()[0] == 0.0

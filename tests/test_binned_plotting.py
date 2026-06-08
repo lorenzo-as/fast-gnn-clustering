@@ -89,14 +89,14 @@ def test_efficiency_fake_rate_script_smoke(tmp_path: Path, monkeypatch) -> None:
             truth=pl.DataFrame(
                 {
                     "truth_energy": [1.0, 2.0, 8.0 + idx],
-                    "truth_n_hits": [2, 4, 8 + idx],
+                    "n_hits_truth": [2, 4, 8 + idx],
                     "matched": [True, False, True],
                 }
             ),
             predicted=pl.DataFrame(
                 {
-                    "assigned_cluster_energy": [1.5, 3.0, 12.0 + idx],
-                    "cluster_size": [2, 5, 10 + idx],
+                    "energy_pred": [1.5, 3.0, 12.0 + idx],
+                    "n_hits_pred": [2, 5, 10 + idx],
                     "fake": [False, True, False],
                 }
             ),

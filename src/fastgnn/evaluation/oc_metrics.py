@@ -480,7 +480,7 @@ def _truth_rows(ctx: _EventEval) -> list[dict[str, Any]]:
         rows.append(
             {
                 "event_idx": ctx.event_idx,
-                "truth_id": truth_id,
+                "object_id": truth_id,
                 "truth_energy": _first_not_none(
                     props.get("impact_energy"), float(ctx.energy[truth_mask].sum())
                 ),
@@ -492,12 +492,12 @@ def _truth_rows(ctx: _EventEval) -> list[dict[str, Any]]:
                 "truth_eta": _first_not_none(props.get("impact_eta"), centroid["eta"]),
                 "truth_phi": _first_not_none(props.get("impact_phi"), centroid["phi"]),
                 **_prefixed_centroid("truth_centroid", centroid),
-                "truth_n_hits": int(truth_mask.sum()),
+                "n_hits_truth": int(truth_mask.sum()),
                 "truth_object_n_hits": props.get("n_hits"),
                 "event_truth_multiplicity": len(ctx.truth_ids),
-                "max_beta": float(ctx.beta[truth_mask].max()),
+                "beta_max": float(ctx.beta[truth_mask].max()),
                 "seed_found": bool(np.any(ctx.beta[truth_mask] > ctx.tbeta)),
-                "nearest_truth_distance": nearest.get(truth_id),
+                "nearest_truth_dist": nearest.get(truth_id),
                 "matched": False,
             }
         )
@@ -514,13 +514,12 @@ def _pred_rows(ctx: _EventEval) -> list[dict[str, Any]]:
         reco = ctx.pred_reco[pred_id + 1]
         row = {
             "event_idx": ctx.event_idx,
-            "pred_id": pred_id,
-            "seed_index": seed_index,
-            "seed_beta": float(ctx.beta[seed_index]),
+            "cluster_id_pred": pred_id,
+            "seed_hit_idx": seed_index,
+            "beta_seed": float(ctx.beta[seed_index]),
             "seed_truth_id": int(ctx.labels[seed_index]),
-            "cluster_size": int(cluster_mask.sum()),
-            "assigned_cluster_energy": reco["energy"],
-            "sum_energy_reco": reco["energy"],
+            "n_hits_pred": int(cluster_mask.sum()),
+            "energy_pred": reco["energy"],
             "sum_et_reco": reco["et"],
             **_prefixed_centroid("centroid", reco, suffix="reco"),
             "dominant_truth_id": dominant_truth_id,
@@ -552,9 +551,9 @@ def _seed_rows(ctx: _EventEval) -> list[dict[str, Any]]:
         rows.append(
             {
                 "event_idx": ctx.event_idx,
-                "seed_index": seed_index,
+                "seed_hit_idx": seed_index,
                 "seed_rank": rank,
-                "seed_beta": float(ctx.beta[seed_index]),
+                "beta_seed": float(ctx.beta[seed_index]),
                 "seed_truth_id": truth_id,
                 "seed_class": seed_class,
             }
@@ -616,22 +615,24 @@ def _match_rows(ctx: _EventEval) -> list[dict[str, Any]]:
 
         row = {
             "event_idx": ctx.event_idx,
-            "truth_id": truth_id,
-            "pred_id": pred_id,
-            "seed_index": seed_index,
-            "seed_beta": float(ctx.beta[seed_index]),
+            "object_id": truth_id,
+            "cluster_id_pred": pred_id,
+            "seed_hit_idx": seed_index,
+            "beta_seed": float(ctx.beta[seed_index]),
             "centroid_distance": float(centroid_distance[truth_pos, pred_pos]),
             "energy_ratio": float(energy_ratio[truth_pos, pred_pos]),
-            "hit_purity": _safe_ratio(intersection_hits[truth_pos, pred_pos], cluster_mask.sum()),
-            "hit_efficiency": _safe_ratio(intersection_hits[truth_pos, pred_pos], truth_mask.sum()),
-            "energy_purity": _safe_ratio(intersection[truth_pos, pred_pos], pred_energy[pred_pos]),
-            "energy_efficiency": _safe_ratio(
+            "purity": _safe_ratio(intersection_hits[truth_pos, pred_pos], cluster_mask.sum()),
+            "completeness": _safe_ratio(intersection_hits[truth_pos, pred_pos], truth_mask.sum()),
+            "energy_assigned_fraction": _safe_ratio(
+                intersection[truth_pos, pred_pos], pred_energy[pred_pos]
+            ),
+            "energy_recovered_fraction": _safe_ratio(
                 intersection[truth_pos, pred_pos], truth_energy[truth_pos]
             ),
             "truth_energy": truth_ref_energy,
             "truth_sum_energy": float(truth_energy[truth_pos]),
             "truth_et": truth_centroid["et"],
-            "sum_energy_reco": pred_centroid["energy"],
+            "energy_pred": pred_centroid["energy"],
             "sum_et_reco": pred_centroid["et"],
             "sum_energy_response": _safe_ratio(pred_centroid["energy"], truth_energy[truth_pos]),
             "et_response": _safe_ratio(pred_centroid["et"], truth_centroid["et"]),
@@ -694,12 +695,12 @@ def _mark_matches(
     pred_rows: list[dict[str, Any]],
     match_rows: list[dict[str, Any]],
 ) -> None:
-    matched_truth = {row["truth_id"] for row in match_rows}
-    matched_pred = {row["pred_id"] for row in match_rows}
+    matched_truth = {row["object_id"] for row in match_rows}
+    matched_pred = {row["cluster_id_pred"] for row in match_rows}
     for row in truth_rows:
-        row["matched"] = row["truth_id"] in matched_truth
+        row["matched"] = row["object_id"] in matched_truth
     for row in pred_rows:
-        row["matched"] = row["pred_id"] in matched_pred
+        row["matched"] = row["cluster_id_pred"] in matched_pred
         row["fake"] = not row["matched"]
 
 

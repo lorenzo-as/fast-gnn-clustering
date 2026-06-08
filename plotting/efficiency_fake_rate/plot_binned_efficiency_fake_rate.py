@@ -79,17 +79,17 @@ def log_edges(values, *, bins: int) -> np.ndarray:
 def notebook_bins(oc_eval, column: str, *, bins: int, threshold: float | None) -> np.ndarray:
     if column == "truth_energy":
         return log_edges(oc_eval.truth["truth_energy"], bins=bins)
-    if column == "assigned_cluster_energy":
-        pred_energy = oc_eval.predicted["assigned_cluster_energy"]
+    if column == "energy_pred":
+        pred_energy = oc_eval.predicted["energy_pred"]
         if threshold is None:
             return log_edges(pred_energy, bins=bins)
         truth_bins = log_edges(oc_eval.truth["truth_energy"], bins=bins)
         pred_low_bins = log_edges(pred_energy.filter(pred_energy < threshold), bins=3)
         return np.concatenate([pred_low_bins, truth_bins[1:]])
-    if column == "truth_n_hits":
-        return log_edges(oc_eval.truth["truth_n_hits"], bins=bins)
-    if column == "cluster_size":
-        return log_edges(oc_eval.predicted["cluster_size"], bins=bins)
+    if column == "n_hits_truth":
+        return log_edges(oc_eval.truth["n_hits_truth"], bins=bins)
+    if column == "n_hits_pred":
+        return log_edges(oc_eval.predicted["n_hits_pred"], bins=bins)
     raise ValueError(f"no notebook binning rule for column {column}")
 
 
@@ -111,7 +111,7 @@ def main() -> None:
         ),
         (
             "predicted",
-            "assigned_cluster_energy",
+            "energy_pred",
             binned_fake_rate,
             plot_binned_fake_rate,
             "Cluster predicted energy [GeV]",
@@ -119,7 +119,7 @@ def main() -> None:
         ),
         (
             "truth",
-            "truth_n_hits",
+            "n_hits_truth",
             binned_efficiency,
             plot_binned_efficiency,
             "True cluster size",
@@ -127,7 +127,7 @@ def main() -> None:
         ),
         (
             "predicted",
-            "cluster_size",
+            "n_hits_pred",
             binned_fake_rate,
             plot_binned_fake_rate,
             "Predicted cluster size",
@@ -155,7 +155,7 @@ def main() -> None:
         ax.set_xscale("log")
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
-        if args.threshold is not None and column in {"truth_energy", "assigned_cluster_energy"}:
+        if args.threshold is not None and column in {"truth_energy", "energy_pred"}:
             ax.axvline(args.threshold, color="grey", linestyle="--")
         ax.set_ylim(-0.02, 1.02)
         ax.set_yticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
