@@ -50,6 +50,12 @@ outputs/**
 !outputs/**/
 !outputs/**/.gitkeep
 
+
+# Plotting / visualization outputs
+plotting/**
+!plotting/**/*.py
+!plotting/**/
+
 # ML / experiment tracking
 wandb/
 mlruns/
