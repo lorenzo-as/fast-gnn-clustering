@@ -4,10 +4,11 @@ Training loop for HGCAL GNN with Object Condensation loss using tf.GradientTape.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 import logging
 from pathlib import Path
 import time
-from typing import cast
+from typing import Any, cast
 import warnings
 
 import numpy as np
@@ -18,9 +19,10 @@ from fastgnn.data.base import CaloDataset
 from .objectcondensation_loss import (
     batch_and_mask_to_flat,
     calc_LV_Lbeta,
+    calc_payload_loss,
     formatted_loss_components_string,
 )
-from .oc_outputs import OCOutputLayout, split_oc_outputs
+from .oc_outputs import OCOutputLayout, OCOutputSlices, split_oc_outputs
 from .schedules import scheduled_scalar_value
 
 logger = logging.getLogger(__name__)
@@ -50,6 +52,7 @@ def train(
     model_cfg = cfg["model"]
     feature_names = cfg["data"]["feature_names"]
     output_layout = OCOutputLayout.from_config(model_cfg)
+    payload_quantities = _payload_quantities(train_cfg)
 
     optimizer = _build_optimizer(train_cfg)
 
@@ -83,6 +86,7 @@ def train(
             max_vertices=model_cfg["max_vertices"],
             batch_size=train_cfg["batch_size"],
             feature_names=feature_names,
+            payload_quantities=payload_quantities,
             shuffle=True,
             seed=cfg.get("seed", 42) + epoch,
             truncate=train_cfg.get("truncate", "first"),
@@ -103,6 +107,7 @@ def train(
                 train_cfg,
                 output_layout,
                 qmin=qmin,
+                epoch=epoch,
             )
             train_losses.append(float(loss))
             train_components.append(components)
@@ -120,6 +125,7 @@ def train(
             max_vertices=model_cfg["max_vertices"],
             batch_size=train_cfg["batch_size"],
             feature_names=feature_names,
+            payload_quantities=payload_quantities,
             shuffle=False,
             seed=0,
             truncate=train_cfg.get("truncate", "first"),
@@ -131,6 +137,7 @@ def train(
                 train_cfg,
                 output_layout,
                 qmin=qmin,
+                epoch=epoch,
             )
             val_losses.append(float(loss))
             val_components.append(components)
@@ -143,6 +150,7 @@ def train(
                     train_cfg,
                     output_layout,
                     qmin=qmin_reference,
+                    epoch=epoch,
                 )
                 val_reference_losses.append(float(reference_loss))
 
@@ -198,39 +206,14 @@ def _train_step(
     output_layout: OCOutputLayout | None = None,
     *,
     qmin: float | None = None,
+    epoch: int = 0,
 ) -> tuple[tf.Tensor, dict]:
     """Single training step with GradientTape."""
     batch_tensors = {k: tf.constant(v) for k, v in batch.items()}
-    hit_object_id = tf.cast(batch_tensors["hit_object_id"], tf.int32)
-
     with tf.GradientTape() as tape:
-        outputs = model(batch_tensors["features"], training=True)
-        if output_layout is None:
-            output_layout = OCOutputLayout.from_output_dim(int(outputs.shape[-1]))
-        output_slices = split_oc_outputs(outputs, output_layout)
-        flat, batch_idx = batch_and_mask_to_flat(
-            {
-                "beta": output_slices.beta,
-                "cluster_coords": output_slices.cluster_coords,
-                "hit_object_id": hit_object_id,
-                "mask": batch_tensors["mask"],
-            }
+        loss, components = _forward_pass(
+            model, batch_tensors, train_cfg, output_layout, qmin=qmin, epoch=epoch, training=True
         )
-        _assert_no_padding_labels(flat["hit_object_id"])
-        components = calc_LV_Lbeta(
-            beta=flat["beta"],
-            cluster_space_coords=flat["cluster_coords"],
-            cluster_index_per_event=tf.cast(flat["hit_object_id"], tf.int32),
-            batch=batch_idx,
-            qmin=train_cfg.get("qmin", 1.0) if qmin is None else qmin,
-            beta_stabilizing=train_cfg.get("beta_stabilizing", "soft_q_scaling"),
-            beta_term_option=train_cfg.get("beta_term_option", "paper"),
-            return_components=True,
-        )
-        components = cast(dict[str, tf.Tensor], components)
-        _weight_oc_components(components, train_cfg)
-        loss = components["L_total"]
-
     grads = tape.gradient(loss, model.trainable_variables)
     optimizer.apply_gradients(zip(grads, model.trainable_variables, strict=True))
     return loss, components
@@ -243,17 +226,27 @@ def _eval_step(
     output_layout: OCOutputLayout | None = None,
     *,
     qmin: float | None = None,
+    epoch: int = 0,
 ) -> tuple[tf.Tensor, dict]:
-    """
-    Single validation step (no gradient).
-
-    Returns:
-        Tuple of (loss, components) where components is a dictionary of loss components.
-    """
+    """Single validation step (no gradient)."""
     batch_tensors = {k: tf.constant(v) for k, v in batch.items()}
-    hit_object_id = tf.cast(batch_tensors["hit_object_id"], tf.int32)
+    return _forward_pass(
+        model, batch_tensors, train_cfg, output_layout, qmin=qmin, epoch=epoch, training=False
+    )
 
-    outputs = model(batch_tensors["features"], training=False)
+
+def _forward_pass(
+    model: tf.keras.Model,
+    batch_tensors: dict[str, tf.Tensor],
+    train_cfg: dict,
+    output_layout: OCOutputLayout | None,
+    *,
+    qmin: float | None,
+    epoch: int,
+    training: bool,
+) -> tuple[tf.Tensor, dict[str, tf.Tensor]]:
+    hit_object_id = tf.cast(batch_tensors["hit_object_id"], tf.int32)
+    outputs = model(batch_tensors["features"], training=training)
     if output_layout is None:
         output_layout = OCOutputLayout.from_output_dim(int(outputs.shape[-1]))
     output_slices = split_oc_outputs(outputs, output_layout)
@@ -262,6 +255,7 @@ def _eval_step(
             "beta": output_slices.beta,
             "cluster_coords": output_slices.cluster_coords,
             "hit_object_id": hit_object_id,
+            **_payload_flat_inputs(output_slices, output_layout, batch_tensors),
             "mask": batch_tensors["mask"],
         }
     )
@@ -277,14 +271,67 @@ def _eval_step(
         return_components=True,
     )
     components = cast(dict[str, tf.Tensor], components)
-    _weight_oc_components(components, train_cfg)
-    loss = components["L_total"]
-    return loss, components
+    _add_payload_components(components, flat, batch_idx, output_layout, train_cfg)
+    _weight_oc_components(components, train_cfg, epoch=epoch)
+    return components["L_total"], components
 
 
-def _weight_oc_components(components: dict[str, tf.Tensor], train_cfg: dict) -> None:
+def _payload_flat_inputs(
+    output_slices: OCOutputSlices,
+    output_layout: OCOutputLayout,
+    batch_tensors: dict[str, tf.Tensor],
+) -> dict[str, tf.Tensor]:
+    if output_layout.payload is None:
+        return {}
+    if "payload_targets" not in batch_tensors:
+        raise KeyError(
+            "Configured training.payload.quantities but batch is missing payload_targets"
+        )
+    if output_slices.payload is None:
+        raise ValueError("Configured payload layout but split outputs did not produce payload")
+    return {
+        "payload_predictions": output_slices.payload,
+        "payload_targets": batch_tensors["payload_targets"],
+    }
+
+
+def _add_payload_components(
+    components: dict[str, tf.Tensor],
+    flat: dict,
+    batch_idx: tf.Tensor,
+    output_layout: OCOutputLayout,
+    train_cfg: dict,
+) -> None:
+    payload_quantities = _payload_quantities(train_cfg)
+    if not payload_quantities:
+        return
+    if output_layout.payload is None:
+        raise ValueError("training.payload.quantities requires model.payload_output_dim > 0")
+    payload_components = calc_payload_loss(
+        payload_predictions=flat["payload_predictions"],
+        payload_targets=flat["payload_targets"],
+        cluster_index_per_event=tf.cast(flat["hit_object_id"], tf.int32),
+        batch=batch_idx,
+        payload_specs=payload_quantities,
+        huber_delta=float((train_cfg.get("payload") or {}).get("huber_delta", 1.0)),
+        return_components=True,
+    )
+    components.update(cast(dict[str, tf.Tensor], payload_components))
+
+
+def _payload_quantities(train_cfg: dict) -> list:
+    payload_cfg = train_cfg.get("payload") or {}
+    return list(payload_cfg.get("quantities") or [])
+
+
+def _weight_oc_components(
+    components: dict[str, tf.Tensor],
+    train_cfg: dict,
+    *,
+    epoch: int = 0,
+) -> None:
     """Scale OC component dict in place to match the optimized objective."""
-    weights = _oc_loss_weights(train_cfg)
+    weights = _oc_loss_weights(train_cfg, epoch=epoch)
 
     components["L_V_attractive"] = weights["L_V_attractive"] * components["L_V_attractive"]
     components["L_V_repulsive"] = weights["L_V_repulsive"] * components["L_V_repulsive"]
@@ -297,17 +344,42 @@ def _weight_oc_components(components: dict[str, tf.Tensor], train_cfg: dict) -> 
 
     components["L_V"] = components["L_V_attractive"] + components["L_V_repulsive"]
     components["L_beta"] = components["L_beta_sig"] + components["L_beta_noise"]
-    components["L_total"] = components["L_V"] + components["L_beta"]
+    if "L_payload" in components:
+        for key in list(components):
+            if key.startswith("L_payload"):
+                components[key] = weights["L_payload"] * components[key]
+    components["L_total"] = (
+        components["L_V"]
+        + components["L_beta"]
+        + components.get(
+            "L_payload",
+            tf.constant(0.0, dtype=components["L_V"].dtype),
+        )
+    )
 
 
-def _oc_loss_weights(train_cfg: dict) -> dict[str, float]:
+def _oc_loss_weights(train_cfg: dict, *, epoch: int = 0) -> dict[str, float]:
     weights = train_cfg.get("loss_weights") or {}
     return {
-        "L_V_attractive": float(weights.get("L_V_attractive", 1.0)),
-        "L_V_repulsive": float(weights.get("L_V_repulsive", 1.0)),
-        "L_beta_sig": float(weights.get("L_beta_sig", 1.0)),
-        "L_beta_noise": float(weights.get("L_beta_noise", 0.1)),
+        "L_V_attractive": _scheduled_loss_weight(weights, "L_V_attractive", 1.0, epoch),
+        "L_V_repulsive": _scheduled_loss_weight(weights, "L_V_repulsive", 1.0, epoch),
+        "L_beta_sig": _scheduled_loss_weight(weights, "L_beta_sig", 1.0, epoch),
+        "L_beta_noise": _scheduled_loss_weight(weights, "L_beta_noise", 0.1, epoch),
+        "L_payload": _scheduled_loss_weight(weights, "L_payload", 1.0, epoch),
     }
+
+
+def _scheduled_loss_weight(weights: dict, key: str, default: float, epoch: int) -> float:
+    value = weights.get(key, default)
+    if _is_sequence_schedule(value):
+        return scheduled_scalar_value(default, {"points": value}, epoch)
+    if isinstance(value, Mapping):
+        return scheduled_scalar_value(default, value, epoch)
+    return float(value)
+
+
+def _is_sequence_schedule(value: Any) -> bool:
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes))
 
 
 def _mean_components(components_per_batch: list[dict[str, tf.Tensor]]) -> dict[str, float]:

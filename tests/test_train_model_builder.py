@@ -94,8 +94,9 @@ def test_build_gravnet_model_requires_quantized_boolean(fake_qgravnet) -> None:
 
 
 class _FakeDataset:
-    def __init__(self, error: Exception | None = None):
+    def __init__(self, error: Exception | None = None, fields: dict | None = None):
         self.error = error
+        self.fields = fields or {"truth.objects": []}
         self.calls = []
 
     def validate_feature_names(self, feature_names, *, normalize):
@@ -114,6 +115,34 @@ def _training_cfg():
         {
             "data": {"feature_names": ["x", "eta"]},
             "training": {"normalize_features": True},
+        }
+    )
+
+
+def _payload_training_cfg():
+    return OmegaConf.create(
+        {
+            "data": {"feature_names": ["x", "eta"]},
+            "model": {
+                "output_dim": 3,
+                "output_layout": {
+                    "beta": {"index": 0, "activation": "sigmoid"},
+                    "cluster_space": {"start": 1, "dim": 1},
+                    "payload": {"start": 2, "dim": 1},
+                },
+            },
+            "training": {
+                "normalize_features": True,
+                "payload": {
+                    "quantities": [
+                        {
+                            "name": "eta",
+                            "field": "eta_energy_weighted",
+                            "transform": "identity",
+                        }
+                    ]
+                },
+            },
         }
     )
 
@@ -144,4 +173,14 @@ def test_training_contract_rejects_model_input_dimension_mismatch() -> None:
             _FakeDataset(),
             _FakeDataset(),
             _training_cfg(),
+        )
+
+
+def test_training_contract_rejects_missing_payload_truth_fields() -> None:
+    with pytest.raises(ValueError, match=r"missing payload truth\.objects"):
+        _validate_training_contract(
+            _FakeModel((None, 16, 2)),
+            _FakeDataset(fields={"truth.objects": ["sum_et"]}),
+            _FakeDataset(fields={"truth.objects": ["eta_energy_weighted"]}),
+            _payload_training_cfg(),
         )

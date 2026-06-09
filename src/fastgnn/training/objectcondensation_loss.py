@@ -8,6 +8,8 @@ TensorFlow port of:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import numpy as np
 import tensorflow as tf
 
@@ -418,6 +420,130 @@ def calc_LV_Lbeta(
     return L_V / batch_size_f, L_beta / batch_size_f
 
 
+def calc_payload_loss(
+    payload_predictions: tf.Tensor,
+    payload_targets: tf.Tensor,
+    cluster_index_per_event: tf.Tensor,
+    batch: tf.Tensor,
+    payload_specs: tuple | list,
+    *,
+    huber_delta: float = 1.0,
+    noise_cluster_index: int = 0,
+    return_components: bool = False,
+) -> tf.Tensor | dict[str, tf.Tensor]:
+    """
+    Compute object-balanced payload regression loss.
+
+    ``payload_targets`` are expected to already be transformed into the same
+    component space as the model outputs, e.g. ``[sin(phi), cos(phi)]`` for an
+    angular quantity. Noise hits and padding are excluded by label and mask
+    before this function is called.
+    """
+    if noise_cluster_index != 0:
+        raise NotImplementedError("noise_cluster_index != 0 not supported")
+    if not payload_specs:
+        zero = tf.reduce_sum(payload_predictions) * 0.0
+        return {"L_payload": zero} if return_components else zero
+
+    batch = tf.cast(batch, tf.int32)
+    cluster_index_per_event = tf.cast(cluster_index_per_event, tf.int32)
+    batch_size = tf.reduce_max(batch) + 1
+
+    is_sig = cluster_index_per_event > noise_cluster_index
+    object_index_per_event = tf.boolean_mask(cluster_index_per_event, is_sig) - 1
+    batch_sig = tf.boolean_mask(batch, is_sig)
+    n_objects_per_event = tf.cast(
+        tf.maximum(
+            scatter_max_vals(object_index_per_event + 1, batch_sig, batch_size),
+            0,
+        ),
+        tf.int32,
+    )
+    offsets_per_event = tf.concat([[0], tf.cumsum(n_objects_per_event)[:-1]], axis=0)
+    object_index = object_index_per_event + tf.gather(offsets_per_event, batch_sig)
+    n_objects = tf.reduce_sum(n_objects_per_event)
+    n_hits_per_object = tf.cast(scatter_count(object_index, n_objects), tf.float32)
+    batch_object = tf.repeat(tf.range(batch_size, dtype=tf.int32), n_objects_per_event)
+
+    pred_sig = tf.boolean_mask(tf.cast(payload_predictions, tf.float32), is_sig)
+    target_sig = tf.boolean_mask(tf.cast(payload_targets, tf.float32), is_sig)
+
+    total_per_hit = tf.zeros(tf.shape(object_index), dtype=tf.float32)
+    components: dict[str, tf.Tensor] = {}
+    cursor = 0
+    for spec in payload_specs:
+        name = str(_spec_value(spec, "name"))
+        dim = _payload_spec_dim(spec)
+        weight = float(_spec_value(spec, "weight", 1.0))
+        start = cursor
+        stop = cursor + dim
+        per_hit = tf.reduce_sum(
+            huber(pred_sig[:, start:stop] - target_sig[:, start:stop], huber_delta),
+            axis=-1,
+        )
+        weighted_per_hit = weight * per_hit
+        total_per_hit += weighted_per_hit
+        components[f"L_payload_{name}"] = _object_balanced_mean(
+            weighted_per_hit,
+            object_index,
+            n_objects,
+            n_hits_per_object,
+            batch_object,
+            batch_size,
+        )
+        cursor = stop
+
+    L_payload = _object_balanced_mean(
+        total_per_hit,
+        object_index,
+        n_objects,
+        n_hits_per_object,
+        batch_object,
+        batch_size,
+    )
+    if return_components:
+        return {"L_payload": L_payload, **components}
+    return L_payload
+
+
+def _object_balanced_mean(
+    per_hit_loss: tf.Tensor,
+    object_index: tf.Tensor,
+    n_objects: tf.Tensor,
+    n_hits_per_object: tf.Tensor,
+    batch_object: tf.Tensor,
+    batch_size: tf.Tensor,
+) -> tf.Tensor:
+    per_object_sum = scatter_sum(per_hit_loss, object_index, n_objects)
+    per_object = safe_divide(per_object_sum, n_hits_per_object)
+    per_event_sum = scatter_sum(per_object, batch_object, batch_size)
+    n_objects_per_event = tf.cast(scatter_count(batch_object, batch_size), tf.float32)
+    per_event = safe_divide(per_event_sum, n_objects_per_event)
+    return tf.reduce_sum(per_event) / tf.cast(batch_size, tf.float32)
+
+
+def _spec_value(spec, name: str, default=None):
+    if hasattr(spec, name):
+        return getattr(spec, name)
+    if default is not None:
+        return spec.get(name, default)
+    return spec[name]
+
+
+def _payload_spec_dim(spec) -> int:
+    if hasattr(spec, "dim") or (isinstance(spec, Mapping) and "dim" in spec):
+        return int(_spec_value(spec, "dim"))
+    transform = str(_spec_value(spec, "transform", "identity"))
+    if transform in {"identity", "log", "scale"}:
+        return 1
+    if transform == "sin_cos":
+        return 2
+    raise ValueError(
+        f"Unknown payload transform {transform!r}. "
+        "Available transforms: identity, log, scale, sin_cos"
+    )
+
+
 def _q_alpha_fallback(
     q_sig: tf.Tensor,
     object_index: tf.Tensor,
@@ -525,4 +651,8 @@ def formatted_loss_components_string(components: dict) -> str:
             f"  L_beta_norms   = {fmt('L_beta_norms_term')}",
             f"  L_beta_logbeta = {fmt('L_beta_logbeta_term')}",
         ]
+    if "L_payload" in components:
+        lines.append(f"  L_payload      = {fmt('L_payload')}")
+        for key in sorted(k for k in components if k.startswith("L_payload_")):
+            lines.append(f"  {key:<14}= {fmt(key)}")
     return "\n".join(lines)

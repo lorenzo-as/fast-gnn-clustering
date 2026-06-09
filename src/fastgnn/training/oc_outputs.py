@@ -10,15 +10,12 @@ import numpy as np
 
 
 @dataclass(frozen=True)
-class OCRegressionSpec:
-    """One optional per-hit regression slice in the flat OC output tensor."""
+class OCPayloadLayout:
+    """The optional generic payload slice in the flat OC output tensor."""
 
-    name: str
     start: int
     dim: int
-    source: str = "seed"
-    target: str | None = None
-    components: tuple[str, ...] = ()
+    name: str = "payload"
 
     @property
     def stop(self) -> int:
@@ -40,7 +37,7 @@ class OCOutputLayout:
     beta_activation: str = "sigmoid"
     cluster_start: int = 1
     cluster_dim: int = 0
-    regressions: tuple[OCRegressionSpec, ...] = ()
+    payload: OCPayloadLayout | None = None
 
     @classmethod
     def from_config(cls, model_cfg: Mapping[str, Any]) -> OCOutputLayout:
@@ -52,26 +49,30 @@ class OCOutputLayout:
         layout = _plain_mapping(layout_cfg)
         beta_cfg = _plain_mapping(layout.get("beta", {}))
         cluster_cfg = _plain_mapping(layout.get("cluster_space", {}))
+        payload_cfg_raw = layout.get("payload")
+        payload_cfg = None if payload_cfg_raw is None else _plain_mapping(payload_cfg_raw)
+        if "regressions" in layout:
+            raise ValueError("output_layout.regressions is no longer supported; use payload")
 
-        regressions = tuple(
-            OCRegressionSpec(
-                name=str(reg_cfg["name"]),
-                start=int(reg_cfg["start"]),
-                dim=int(reg_cfg["dim"]),
-                source=str(reg_cfg.get("source", "seed")),
-                target=None if reg_cfg.get("target") is None else str(reg_cfg["target"]),
-                components=tuple(str(component) for component in reg_cfg.get("components", ())),
+        cluster_start = int(cluster_cfg.get("start", 1))
+        cluster_dim = int(cluster_cfg["dim"])
+        payload_output_dim = int(payload_cfg.get("dim", 0)) if payload_cfg is not None else 0
+        payload = (
+            OCPayloadLayout(
+                start=int(payload_cfg.get("start", cluster_start + cluster_dim)),
+                dim=payload_output_dim,
             )
-            for reg_cfg in (_plain_mapping(item) for item in layout.get("regressions", ()))
+            if payload_output_dim > 0
+            else None
         )
 
         out = cls(
             output_dim=output_dim,
             beta_index=int(beta_cfg.get("index", 0)),
             beta_activation=str(beta_cfg.get("activation", "sigmoid")),
-            cluster_start=int(cluster_cfg.get("start", 1)),
-            cluster_dim=int(cluster_cfg["dim"]),
-            regressions=regressions,
+            cluster_start=cluster_start,
+            cluster_dim=cluster_dim,
+            payload=payload,
         )
         out.validate()
         return out
@@ -87,8 +88,8 @@ class OCOutputLayout:
         return self.cluster_start + self.cluster_dim
 
     @property
-    def regression_dim(self) -> int:
-        return sum(reg.dim for reg in self.regressions)
+    def payload_dim(self) -> int:
+        return 0 if self.payload is None else self.payload.dim
 
     def validate(self) -> None:
         if self.output_dim < 2:
@@ -102,7 +103,8 @@ class OCOutputLayout:
 
         slices = [("beta", self.beta_index, self.beta_index + 1)]
         slices.append(("cluster_space", self.cluster_start, self.cluster_stop))
-        slices.extend((reg.name, reg.start, reg.stop) for reg in self.regressions)
+        if self.payload is not None:
+            slices.append((self.payload.name, self.payload.start, self.payload.stop))
 
         for name, start, stop in slices:
             if start < 0 or stop > self.output_dim or start >= stop:
@@ -119,11 +121,11 @@ class OCOutputLayout:
                 raise ValueError(f"OC output slice {name!r} overlaps indices {overlap}")
             covered.extend(values)
 
-        expected = 1 + self.cluster_dim + self.regression_dim
+        expected = 1 + self.cluster_dim + self.payload_dim
         if expected != self.output_dim:
             raise ValueError(
                 "OC output layout dimensions must sum to output_dim: "
-                f"1 + {self.cluster_dim} + {self.regression_dim} = {expected}, "
+                f"1 + {self.cluster_dim} + {self.payload_dim} = {expected}, "
                 f"output_dim={self.output_dim}"
             )
 
@@ -135,7 +137,7 @@ class OCOutputSlices:
     beta_logits: Any
     beta: Any
     cluster_coords: Any
-    regressions: Mapping[str, Any]
+    payload: Any | None
     layout: OCOutputLayout
 
 
@@ -144,12 +146,14 @@ def split_oc_outputs(outputs: Any, layout: OCOutputLayout) -> OCOutputSlices:
     beta_logits = outputs[..., layout.beta_index]
     beta = _sigmoid(beta_logits)
     cluster_coords = outputs[..., layout.cluster_start : layout.cluster_stop]
-    regressions = {reg.name: outputs[..., reg.start : reg.stop] for reg in layout.regressions}
+    payload = (
+        None if layout.payload is None else outputs[..., layout.payload.start : layout.payload.stop]
+    )
     return OCOutputSlices(
         beta_logits=beta_logits,
         beta=beta,
         cluster_coords=cluster_coords,
-        regressions=regressions,
+        payload=payload,
         layout=layout,
     )
 

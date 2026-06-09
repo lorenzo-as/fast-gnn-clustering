@@ -14,6 +14,7 @@ from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
 
 from fastgnn.data import CaloDataset
+from fastgnn.data.base import _payload_quantity_dim
 from fastgnn.utils import get_project_root, resolve_project_path
 
 logger = logging.getLogger(__name__)
@@ -164,11 +165,14 @@ def _validate_training_contract(
     """Fail before training when configured model inputs and dataset fields disagree."""
     feature_names = list(cfg.data.feature_names)
     normalize = bool(cfg.training.get("normalize_features", True))
+    payload_quantities = list((cfg.training.get("payload") or {}).get("quantities") or [])
     for split, dataset in (("train", train_dataset), ("val", val_dataset)):
         try:
             dataset.validate_feature_names(feature_names, normalize=normalize)
         except (KeyError, ValueError) as exc:
             raise ValueError(f"{split} dataset feature validation failed: {exc}") from exc
+        if payload_quantities:
+            _validate_payload_quantity_fields(split, dataset, payload_quantities)
 
     input_shape = model.input_shape
     if isinstance(input_shape, list):
@@ -179,6 +183,37 @@ def _validate_training_contract(
         raise ValueError(
             "Model input feature dimension does not match cfg.data.feature_names: "
             f"model.input_shape={input_shape}, configured features={feature_names}"
+        )
+    if payload_quantities:
+        from fastgnn.training.oc_outputs import OCOutputLayout
+
+        layout = OCOutputLayout.from_config(cfg.model)
+        target_dim = sum(_payload_quantity_dim(quantity) for quantity in payload_quantities)
+        if layout.payload_dim != target_dim:
+            raise ValueError(
+                "Configured payload target dimension does not match model.output_layout.payload.dim: "
+                f"payload targets={target_dim}, model payload dim={layout.payload_dim}"
+            )
+
+
+def _validate_payload_quantity_fields(
+    split: str,
+    dataset: CaloDataset,
+    payload_quantities: list,
+) -> None:
+    available = set(dataset.fields.get("truth.objects", []))
+    missing = sorted(
+        {
+            str(quantity["field"])
+            for quantity in payload_quantities
+            if str(quantity["field"]) not in available
+        }
+    )
+    if missing:
+        available_msg = ", ".join(sorted(available)) or "<none>"
+        raise ValueError(
+            f"{split} dataset is missing payload truth.objects field(s): "
+            f"{', '.join(missing)}. Available fields: {available_msg}"
         )
 
 

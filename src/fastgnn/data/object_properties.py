@@ -146,22 +146,22 @@ def compute_object_properties_from_links(
         return out.astype(np.float32)
 
     result = {}
+    derived_eta_phi = None
+
+    def geometry() -> tuple[np.ndarray, np.ndarray]:
+        nonlocal derived_eta_phi
+        if derived_eta_phi is None:
+            derived_eta_phi = xyz_to_eta_phi(
+                _field(hits, "x"),
+                _field(hits, "y"),
+                _field(hits, "z"),
+            )
+        return derived_eta_phi
+
     if "sum_energy" in property_names:
         result["sum_energy"] = sum_links(weights * energy[hit_indices])
 
     if "sum_et" in property_names:
-        derived_eta_phi = None
-
-        def geometry() -> tuple[np.ndarray, np.ndarray]:
-            nonlocal derived_eta_phi
-            if derived_eta_phi is None:
-                derived_eta_phi = xyz_to_eta_phi(
-                    _field(hits, "x"),
-                    _field(hits, "y"),
-                    _field(hits, "z"),
-                )
-            return derived_eta_phi
-
         eta = None
         if "et" not in hits:
             eta = _field(hits, "eta") if "eta" in hits else geometry()[0]
@@ -177,18 +177,6 @@ def compute_object_properties_from_links(
         "phi_energy_weighted",
     }
     if set(property_names) & position_properties:
-        derived_eta_phi = None
-
-        def geometry() -> tuple[np.ndarray, np.ndarray]:
-            nonlocal derived_eta_phi
-            if derived_eta_phi is None:
-                derived_eta_phi = xyz_to_eta_phi(
-                    _field(hits, "x"),
-                    _field(hits, "y"),
-                    _field(hits, "z"),
-                )
-            return derived_eta_phi
-
         linked_energy = weights * energy[hit_indices]
         linked_sum_energy = sum_links(linked_energy)
 

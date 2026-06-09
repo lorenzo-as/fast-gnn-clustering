@@ -31,7 +31,13 @@ def test_train_config_composes() -> None:
     assert cfg.training.loss_weights.L_V_repulsive == 1.0
     assert cfg.training.loss_weights.L_beta_sig == 1.0
     assert cfg.training.loss_weights.L_beta_noise == 0.1
+    assert cfg.training.loss_weights.L_payload == 1.0
+    assert cfg.training.payload.huber_delta == 1.0
     assert cfg.model.max_vertices == 1024
+    assert cfg.model.output_dim == 9
+    assert cfg.model.output_layout.payload.dim == 5
+    assert cfg.training.payload.quantities[0].field == "sum_et"
+    assert cfg.training.payload.quantities[2].transform == "sin_cos"
     assert cfg.run_name is None
 
 
@@ -40,6 +46,8 @@ def test_quantized_model_config_composes() -> None:
 
     assert cfg.model.name == "qgravnet_v0"
     assert cfg.model.quantized is True
+    assert cfg.model.output_dim == 8
+    assert cfg.model.output_layout.payload.start == 3
     assert cfg.model.quantization.dense_kernel_quantizer.startswith("quantized_bits")
 
 

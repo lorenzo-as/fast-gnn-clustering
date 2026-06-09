@@ -26,8 +26,30 @@ from fastgnn.data.cmssw.transforms import (
     preprocess_rechits_energy_threshold,
     preprocess_vertices,
 )
-from fastgnn.training.objectcondensation_loss import calc_LV_Lbeta, get_clustering_np
-from fastgnn.training.trainer import _build_optimizer, _train_step, _weight_oc_components
+from fastgnn.training.objectcondensation_loss import (
+    calc_LV_Lbeta,
+    calc_payload_loss,
+    get_clustering_np,
+)
+from fastgnn.training.oc_outputs import OCOutputLayout
+from fastgnn.training.trainer import (
+    _build_optimizer,
+    _oc_loss_weights,
+    _train_step,
+    _weight_oc_components,
+)
+
+PAYLOAD_QUANTITIES = [
+    {"name": "log_sum_et", "field": "sum_et", "transform": "log", "epsilon": 1.0e-6},
+    {"name": "eta", "field": "eta_energy_weighted", "transform": "identity"},
+    {"name": "phi", "field": "phi_energy_weighted", "transform": "sin_cos"},
+    {
+        "name": "z",
+        "field": "z_energy_weighted",
+        "transform": "scale",
+        "scale": 100.0,
+    },
+]
 
 
 @pytest.fixture
@@ -112,6 +134,10 @@ def _event_record(
                 "impact_pt": object_energy / 2.0,
                 "sim_energy": object_energy + 1.0,
                 "track_pdg_id": np.full(n_objects, 22, dtype=np.int32),
+                "sum_et": object_energy / 2.0,
+                "eta_energy_weighted": np.arange(n_objects, dtype=np.float32) + 1.0,
+                "phi_energy_weighted": np.arange(n_objects, dtype=np.float32) + 0.25,
+                "z_energy_weighted": np.full(n_objects, 100.0, dtype=np.float32),
             },
         },
         "metadata": {"source": "test", "zside": 1},
@@ -214,6 +240,64 @@ def test_random_truncation_preserves_alignment() -> None:
     np.testing.assert_array_equal(batch["hit_object_id"][0], expected)
 
 
+def test_payload_targets_follow_truncation_and_compacted_labels() -> None:
+    event = {
+        "features": np.arange(30, dtype=np.float32).reshape(10, 3),
+        "hit_object_id": np.array([0, 2, 2, 5, 0, 5, 8, 8, 8, 0], dtype=np.int32),
+        "payload_targets": np.column_stack(
+            [
+                np.arange(10, dtype=np.float32),
+                np.arange(10, dtype=np.float32) + 100.0,
+            ]
+        ),
+    }
+    collator = PadCollator(
+        max_vertices=5,
+        feature_names=["x", "y", "energy"],
+        payload_quantities=[{"name": "a", "field": "a"}],
+        truncate="random",
+        seed=123,
+    )
+
+    batch = collator([event])
+    selected = (batch["features"][0, :, 0] // 3).astype(np.int32)
+
+    np.testing.assert_array_equal(
+        batch["hit_object_id"][0], _compact(event["hit_object_id"][selected])
+    )
+    np.testing.assert_array_equal(batch["payload_targets"][0], event["payload_targets"][selected])
+
+
+def test_event_record_builds_transformed_payload_targets(dataset_dir: Path) -> None:
+    dataset = CaloDataset(dataset_dir, split="train")
+
+    padded = dataset.as_padded(
+        max_vertices=6,
+        payload_quantities=PAYLOAD_QUANTITIES,
+        normalize_features=False,
+    )
+
+    expected_obj1 = [
+        np.log(5.0 + 1.0e-6),
+        1.0,
+        np.sin(0.25),
+        np.cos(0.25),
+        1.0,
+    ]
+    expected_obj2 = [
+        np.log(10.0 + 1.0e-6),
+        2.0,
+        np.sin(1.25),
+        np.cos(1.25),
+        1.0,
+    ]
+    np.testing.assert_allclose(padded["payload_targets"][0, 0], expected_obj1)
+    np.testing.assert_allclose(padded["payload_targets"][0, 1], expected_obj1)
+    np.testing.assert_allclose(padded["payload_targets"][0, 2], np.zeros(5))
+    np.testing.assert_allclose(padded["payload_targets"][0, 3], expected_obj2)
+    np.testing.assert_allclose(padded["payload_targets"][0, 4:], np.zeros((2, 5)))
+
+
 def test_padding_uses_distinct_label_sentinel() -> None:
     event = {
         "features": np.arange(6, dtype=np.float32).reshape(3, 2),
@@ -295,6 +379,26 @@ def test_oc_loss_handles_trailing_events_with_no_signal_hits() -> None:
     assert np.isfinite(float(loss))
 
 
+def test_payload_loss_is_object_balanced() -> None:
+    payload_predictions = tf.constant([[1.0], [3.0], [2.0], [9.0], [4.0], [5.0], [6.0]])
+    payload_targets = tf.zeros((7, 1), dtype=tf.float32)
+    hit_object_id = tf.constant([1, 1, 2, 0, 1, 2, 2], dtype=tf.int32)
+    batch = tf.constant([0, 0, 0, 0, 1, 1, 1], dtype=tf.int32)
+
+    components = calc_payload_loss(
+        payload_predictions=payload_predictions,
+        payload_targets=payload_targets,
+        cluster_index_per_event=hit_object_id,
+        batch=batch,
+        payload_specs=[{"name": "value", "dim": 1, "weight": 1.0}],
+        huber_delta=10.0,
+        return_components=True,
+    )
+
+    assert float(components["L_payload"]) == pytest.approx(13.875)
+    assert float(components["L_payload_value"]) == pytest.approx(13.875)
+
+
 def test_qgravnet_oc_model_output_shape() -> None:
     from qgravnet import QGravNetFactory
 
@@ -367,12 +471,79 @@ def test_one_batch_training_step(dataset_dir: Path) -> None:
     assert float(loss) == pytest.approx(float(components["L_total"]))
 
 
+def test_one_batch_training_step_with_payload_loss(dataset_dir: Path) -> None:
+    from qgravnet import QGravNetFactory
+
+    dataset = CaloDataset(dataset_dir, split="train", max_events=2)
+    batch = next(
+        dataset.batches(
+            max_vertices=16,
+            feature_names=["x", "y", "z", "energy"],
+            payload_quantities=PAYLOAD_QUANTITIES,
+            truncate="random",
+            seed=0,
+            batch_size=1,
+            shuffle=False,
+            normalize_features=True,
+        )
+    )
+    model = QGravNetFactory(
+        n_blocks=1,
+        n_neighbours=4,
+        n_dimensions=2,
+        n_filters=8,
+        n_propagate=4,
+        n_postgn_dense_blocks=1,
+        output_dim=8,
+        output_head="oc",
+    ).create_keras_model(n_vertices=16, n_features=4)
+    output_layout = OCOutputLayout.from_config(
+        {
+            "output_dim": 8,
+            "output_layout": {
+                "beta": {"index": 0, "activation": "sigmoid"},
+                "cluster_space": {"start": 1, "dim": 2},
+                "payload": {"start": 3, "dim": 5},
+            },
+        }
+    )
+    train_cfg = {
+        "optimizer": "adam",
+        "lr": 1.0e-3,
+        "global_clipnorm": 1.0,
+        "qmin": 1.0,
+        "beta_stabilizing": "soft_q_scaling",
+        "beta_term_option": "paper",
+        "payload": {"huber_delta": 1.0, "quantities": PAYLOAD_QUANTITIES},
+        "loss_weights": {
+            "L_V_attractive": 1.0,
+            "L_V_repulsive": 1.0,
+            "L_beta_sig": 1.0,
+            "L_beta_noise": 0.1,
+            "L_payload": 0.5,
+        },
+    }
+    optimizer = _build_optimizer(train_cfg)
+
+    loss, components = _train_step(model, batch, optimizer, train_cfg, output_layout)
+
+    assert np.isfinite(float(loss))
+    assert "L_payload" in components
+    assert "L_payload_phi" in components
+    assert float(components["L_total"]) == pytest.approx(
+        float(components["L_V"] + components["L_beta"] + components["L_payload"])
+    )
+    assert float(loss) == pytest.approx(float(components["L_total"]))
+
+
 def test_oc_loss_weights_scale_saved_components() -> None:
     components = {
         "L_V_attractive": tf.constant(0.5, dtype=tf.float32),
         "L_V_repulsive": tf.constant(1.5, dtype=tf.float32),
         "L_beta_noise": tf.constant(1.0, dtype=tf.float32),
         "L_beta_sig": tf.constant(2.0, dtype=tf.float32),
+        "L_payload": tf.constant(3.0, dtype=tf.float32),
+        "L_payload_energy": tf.constant(3.0, dtype=tf.float32),
     }
 
     _weight_oc_components(
@@ -383,6 +554,7 @@ def test_oc_loss_weights_scale_saved_components() -> None:
                 "L_V_repulsive": 0.25,
                 "L_beta_sig": 2.0,
                 "L_beta_noise": 0.1,
+                "L_payload": 0.5,
             }
         },
     )
@@ -393,7 +565,26 @@ def test_oc_loss_weights_scale_saved_components() -> None:
     assert float(components["L_beta_sig"]) == pytest.approx(4.0)
     assert float(components["L_beta_noise"]) == pytest.approx(0.1)
     assert float(components["L_beta"]) == pytest.approx(4.1)
-    assert float(components["L_total"]) == pytest.approx(4.725)
+    assert float(components["L_payload"]) == pytest.approx(1.5)
+    assert float(components["L_payload_energy"]) == pytest.approx(1.5)
+    assert float(components["L_total"]) == pytest.approx(6.225)
+
+
+def test_loss_weights_accept_piecewise_point_lists() -> None:
+    weights = _oc_loss_weights(
+        {
+            "loss_weights": {
+                "L_V_attractive": [[0, 1.0], [3, 0.5]],
+                "L_beta_noise": 0.2,
+                "L_payload": [[0, 0.0], [5, 1.0]],
+            }
+        },
+        epoch=5,
+    )
+
+    assert weights["L_V_attractive"] == pytest.approx(0.5)
+    assert weights["L_beta_noise"] == pytest.approx(0.2)
+    assert weights["L_payload"] == pytest.approx(1.0)
 
 
 def test_truth_object_energy_threshold_removes_and_remaps_objects() -> None:

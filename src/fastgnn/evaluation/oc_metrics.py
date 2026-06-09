@@ -77,7 +77,6 @@ class _EventEval:
     beta: np.ndarray
     coords: np.ndarray
     features: dict[str, np.ndarray]
-    regressions: dict[str, np.ndarray]
     tbeta: float
     td: float
     max_match_distance: float
@@ -109,7 +108,6 @@ class _EventEval:
         feature_names: list[str],
         tbeta: float,
         td: float,
-        regressions: dict[str, np.ndarray] | None,
         event_idx: int,
         event: EventRecord | None,
         max_match_distance: float,
@@ -123,10 +121,6 @@ class _EventEval:
         beta_v = np.asarray(beta[valid], dtype=np.float64)
         coords_v = np.asarray(cluster_coords[valid], dtype=np.float64)
         features_v = np.asarray(features[valid], dtype=np.float64)
-        regressions_v = {
-            name: np.asarray(values[valid], dtype=np.float64)
-            for name, values in (regressions or {}).items()
-        }
         physical_hits = {
             name: _required_feature(features_v, feature_names, name)
             for name in ("x", "y", "z", "energy")
@@ -149,7 +143,6 @@ class _EventEval:
             beta=beta_v,
             coords=coords_v,
             features=physical_hits,
-            regressions=regressions_v,
             tbeta=tbeta,
             td=td,
             max_match_distance=max_match_distance,
@@ -228,10 +221,6 @@ def evaluate_oc_padded(
             evaluate_oc_event(
                 beta=np.asarray(outputs.beta[event_idx]),
                 cluster_coords=np.asarray(outputs.cluster_coords[event_idx]),
-                regressions={
-                    name: np.asarray(values[event_idx])
-                    for name, values in outputs.regressions.items()
-                },
                 hit_object_id=np.asarray(hit_object_id[event_idx]),
                 mask=np.asarray(mask[event_idx], dtype=bool),
                 features=np.asarray(features[event_idx]),
@@ -261,7 +250,6 @@ def evaluate_oc_event(
     feature_names: list[str],
     tbeta: float,
     td: float,
-    regressions: dict[str, np.ndarray] | None = None,
     event_idx: int = 0,
     event: EventRecord | None = None,
     max_match_distance: float = 10.0,
@@ -280,7 +268,6 @@ def evaluate_oc_event(
         feature_names=feature_names,
         tbeta=tbeta,
         td=td,
-        regressions=regressions,
         event_idx=event_idx,
         event=event,
         max_match_distance=max_match_distance,
@@ -534,7 +521,6 @@ def _pred_rows(ctx: _EventEval) -> list[dict[str, Any]]:
             "matched": False,
             "fake": True,
         }
-        row.update(_model_reco_columns(ctx.regressions, seed_index))
         rows.append(row)
     return rows
 
@@ -672,7 +658,6 @@ def _match_rows(ctx: _EventEval) -> list[dict[str, Any]]:
             if pred_centroid["eta"] is None or truth_eta is None or dphi is None
             else float(np.hypot(pred_centroid["eta"] - truth_eta, dphi)),
         }
-        row.update(_model_reco_columns(ctx.regressions, seed_index))
         rows.append(row)
     return rows
 
@@ -1219,28 +1204,6 @@ def _none_if_nan(value: float) -> float | None:
 
 def _none_to_nan(value: float | None) -> float:
     return np.nan if value is None else float(value)
-
-
-def _model_reco_columns(
-    regressions: dict[str, np.ndarray], seed_index: int
-) -> dict[str, float | None]:
-    out: dict[str, float | None] = {
-        "model_energy_reco": None,
-        "model_x_reco": None,
-        "model_y_reco": None,
-        "model_z_reco": None,
-    }
-    if "energy" in regressions and regressions["energy"].shape[-1] == 1:
-        out["model_energy_reco"] = float(regressions["energy"][seed_index, 0])
-    if "position" in regressions and regressions["position"].shape[-1] >= 3:
-        out.update(
-            {
-                "model_x_reco": float(regressions["position"][seed_index, 0]),
-                "model_y_reco": float(regressions["position"][seed_index, 1]),
-                "model_z_reco": float(regressions["position"][seed_index, 2]),
-            }
-        )
-    return out
 
 
 def _binned_rate(

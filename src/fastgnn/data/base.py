@@ -20,7 +20,7 @@ only when building fixed-shape training batches:
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -142,12 +142,22 @@ class EventRecord:
         self.hits.require(*names)
         return np.stack([self.hits[name] for name in names], axis=1).astype(np.float32)
 
-    def training_dict(self, feature_names: Iterable[str]) -> dict[str, np.ndarray]:
+    def training_dict(
+        self,
+        feature_names: Iterable[str],
+        payload_quantities: Iterable[Mapping[str, Any]] | None = None,
+    ) -> dict[str, np.ndarray]:
         self.truth.require("hit_object_id")
         out = {
             "features": self.features(feature_names),
             "hit_object_id": self.truth.hit_object_id.astype(np.int32),
         }
+        if payload_quantities:
+            out["payload_targets"] = _build_payload_targets(
+                self.truth.hit_object_id,
+                self.truth.objects,
+                payload_quantities,
+            )
         if "energy" in self.hits:
             out["_hit_energy"] = self.hits.energy.astype(np.float32)
         return out
@@ -277,6 +287,7 @@ class CaloDataset:
         max_vertices: int,
         batch_size: int,
         feature_names: Iterable[str] | None = None,
+        payload_quantities: Iterable[Mapping[str, Any]] | None = None,
         shuffle: bool = True,
         seed: int = 0,
         truncate: Literal["first", "energy_desc", "random"] = "first",
@@ -288,6 +299,7 @@ class CaloDataset:
         collator = PadCollator(
             max_vertices=max_vertices,
             feature_names=feature_names,
+            payload_quantities=payload_quantities,
             truncate=truncate,
             seed=seed,
             normalization=self.normalization if normalize_features and self.normalization else None,
@@ -304,6 +316,7 @@ class CaloDataset:
         self,
         max_vertices: int,
         feature_names: Iterable[str] | None = None,
+        payload_quantities: Iterable[Mapping[str, Any]] | None = None,
         truncate: Literal["first", "energy_desc", "random"] = "first",
         normalize_features: bool = True,
         seed: int = 0,
@@ -316,6 +329,7 @@ class CaloDataset:
         collator = PadCollator(
             max_vertices=max_vertices,
             feature_names=feature_names,
+            payload_quantities=payload_quantities,
             truncate=truncate,
             seed=seed,
             normalization=self.normalization if normalize_features and self.normalization else None,
@@ -386,6 +400,7 @@ class PadCollator:
         self,
         max_vertices: int,
         feature_names: Iterable[str] = ("x", "y", "z", "energy"),
+        payload_quantities: Iterable[Mapping[str, Any]] | None = None,
         pad_value: float = 0.0,
         label_pad_value: int = PADDING_OBJECT_ID,
         truncate: Literal["first", "energy_desc", "random"] = "first",
@@ -394,6 +409,7 @@ class PadCollator:
     ):
         self.max_vertices = max_vertices
         self.feature_names = list(feature_names)
+        self.payload_quantities = list(payload_quantities or [])
         self.pad_value = pad_value
         self.label_pad_value = int(label_pad_value)
         self.truncate = truncate
@@ -403,7 +419,7 @@ class PadCollator:
 
     def _as_training_dict(self, event: EventRecord | dict) -> dict[str, np.ndarray]:
         if isinstance(event, EventRecord):
-            return event.training_dict(self.feature_names)
+            return event.training_dict(self.feature_names, self.payload_quantities)
         return event
 
     def __call__(self, events: list[EventRecord | dict]) -> dict[str, np.ndarray]:
@@ -449,6 +465,19 @@ class PadCollator:
                     mask[:n_hits] = True
                     masks.append(mask)
             out[key] = np.stack(arrays)
+
+        if self.payload_quantities:
+            arrays = []
+            for event, order in zip(training_events, orders, strict=True):
+                arr = event["payload_targets"][order]
+                n_hits = arr.shape[0]
+                if n_hits >= self.max_vertices:
+                    arrays.append(arr[: self.max_vertices])
+                    continue
+                pad_shape = (self.max_vertices - n_hits, *arr.shape[1:])
+                pad = np.full(pad_shape, self.pad_value, dtype=arr.dtype)
+                arrays.append(np.concatenate([arr, pad], axis=0))
+            out["payload_targets"] = np.stack(arrays)
 
         out["mask"] = np.stack(masks)
         return out
@@ -515,6 +544,70 @@ def _compact_hit_object_ids(hit_object_id: np.ndarray) -> np.ndarray:
     for new_id, old_id in enumerate(positive, start=1):
         compact[hit_object_id == old_id] = new_id
     return compact
+
+
+def _build_payload_targets(
+    hit_object_id: np.ndarray,
+    truth_objects: FieldGroup,
+    payload_quantities: Iterable[Mapping[str, Any]],
+) -> np.ndarray:
+    """Gather configured truth-object payloads into per-hit transformed targets."""
+    hit_object_id = np.asarray(hit_object_id, dtype=np.int32)
+    quantities = list(payload_quantities)
+    target_dim = sum(_payload_quantity_dim(quantity) for quantity in quantities)
+    targets = np.zeros((len(hit_object_id), target_dim), dtype=np.float32)
+    signal = hit_object_id > NOISE_OBJECT_ID
+    if not np.any(signal):
+        return targets
+
+    object_rows = hit_object_id[signal] - 1
+    cursor = 0
+    for quantity in quantities:
+        field = str(quantity["field"])
+        if field not in truth_objects:
+            available = ", ".join(truth_objects.fields) or "<none>"
+            raise KeyError(
+                f"Missing payload truth.objects field {field!r}. "
+                f"Available fields: {available}"
+            )
+        raw = np.asarray(truth_objects[field], dtype=np.float32)[object_rows]
+        transformed = _transform_payload_target(raw, quantity)
+        dim = transformed.shape[-1]
+        targets[signal, cursor : cursor + dim] = transformed
+        cursor += dim
+    return targets
+
+
+def _payload_quantity_dim(quantity: Mapping[str, Any]) -> int:
+    transform = str(quantity.get("transform", "identity"))
+    if transform in {"identity", "log", "scale"}:
+        return 1
+    if transform == "sin_cos":
+        return 2
+    raise ValueError(f"Unknown payload transform {transform!r}")
+
+
+def _transform_payload_target(
+    values: np.ndarray,
+    quantity: Mapping[str, Any],
+) -> np.ndarray:
+    transform = str(quantity.get("transform", "identity"))
+    values = np.asarray(values, dtype=np.float32)
+    if transform == "identity":
+        out = values[:, None]
+    elif transform == "log":
+        epsilon = float(quantity.get("epsilon", 0.0))
+        out = np.log(values + epsilon)[:, None]
+    elif transform == "scale":
+        scale = float(quantity.get("scale", 1.0))
+        if scale == 0:
+            raise ValueError(f"Payload quantity {quantity.get('name')!r} scale must be non-zero")
+        out = (values / scale)[:, None]
+    elif transform == "sin_cos":
+        out = np.stack([np.sin(values), np.cos(values)], axis=1)
+    else:
+        raise ValueError(f"Unknown payload transform {transform!r}")
+    return out.astype(np.float32)
 
 def compute_normalization(
     records: list[dict[str, Any]],

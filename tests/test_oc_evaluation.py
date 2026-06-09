@@ -23,35 +23,27 @@ def test_legacy_output_layout_splits_beta_and_cluster_coords() -> None:
     assert layout.cluster_dim == 3
     np.testing.assert_allclose(slices.beta, [[0.5]])
     np.testing.assert_allclose(slices.cluster_coords, [[[1.0, 2.0, 3.0]]])
-    assert slices.regressions == {}
+    assert slices.payload is None
 
 
-def test_explicit_output_layout_with_regressions() -> None:
+def test_output_layout_derives_generic_payload_regression_from_output_dim() -> None:
     cfg = {
-        "output_dim": 8,
+        "output_dim": 9,
         "output_layout": {
             "beta": {"index": 0, "activation": "sigmoid"},
             "cluster_space": {"start": 1, "dim": 3},
-            "regressions": [
-                {"name": "energy", "start": 4, "dim": 1, "source": "seed"},
-                {
-                    "name": "position",
-                    "start": 5,
-                    "dim": 3,
-                    "source": "seed",
-                    "components": ["x", "y", "z"],
-                },
-            ],
+            "payload": {"start": 4, "dim": 5},
         },
     }
-    outputs = np.arange(16, dtype=np.float32).reshape(1, 2, 8)
+    outputs = np.arange(18, dtype=np.float32).reshape(1, 2, 9)
 
     layout = OCOutputLayout.from_config(cfg)
     slices = split_oc_outputs(outputs, layout)
 
-    np.testing.assert_array_equal(slices.cluster_coords, outputs[..., 1:4])
-    np.testing.assert_array_equal(slices.regressions["energy"], outputs[..., 4:5])
-    np.testing.assert_array_equal(slices.regressions["position"], outputs[..., 5:8])
+    assert layout.payload_dim == 5
+    assert layout.payload is not None
+    assert (layout.payload.name, layout.payload.start, layout.payload.dim) == ("payload", 4, 5)
+    np.testing.assert_array_equal(slices.payload, outputs[..., 4:9])
 
 
 def test_output_layout_rejects_dimension_mismatch() -> None:
@@ -62,7 +54,6 @@ def test_output_layout_rejects_dimension_mismatch() -> None:
                 "output_layout": {
                     "beta": {"index": 0, "activation": "sigmoid"},
                     "cluster_space": {"start": 1, "dim": 3},
-                    "regressions": [],
                 },
             }
         )
@@ -81,13 +72,9 @@ def test_oc_evaluation_seed_matching_by_xyz_distance_and_binned_rates() -> None:
         ],
         dtype=np.float64,
     )
-    energy_regression = np.array([6.1, 0.0, 9.5, 0.0, 1.0, 1.2], dtype=np.float64)
-    position_regression = np.column_stack([np.arange(6), np.arange(6) + 1, np.arange(6) + 2])
-    preds = np.zeros((1, 6, 8), dtype=np.float64)
+    preds = np.zeros((1, 6, 4), dtype=np.float64)
     preds[0, :, 0] = _logit(beta)
     preds[0, :, 1:4] = coords
-    preds[0, :, 4] = energy_regression
-    preds[0, :, 5:8] = position_regression
 
     features = np.array(
         [
@@ -106,20 +93,10 @@ def test_oc_evaluation_seed_matching_by_xyz_distance_and_binned_rates() -> None:
     mask = np.ones((1, 6), dtype=bool)
     layout = OCOutputLayout.from_config(
         {
-            "output_dim": 8,
+            "output_dim": 4,
             "output_layout": {
                 "beta": {"index": 0, "activation": "sigmoid"},
                 "cluster_space": {"start": 1, "dim": 3},
-                "regressions": [
-                    {"name": "energy", "start": 4, "dim": 1, "source": "seed"},
-                    {
-                        "name": "position",
-                        "start": 5,
-                        "dim": 3,
-                        "source": "seed",
-                        "components": ["x", "y", "z"],
-                    },
-                ],
             },
         }
     )
@@ -173,11 +150,9 @@ def test_oc_evaluation_seed_matching_by_xyz_distance_and_binned_rates() -> None:
     )
     np.testing.assert_allclose(matches["energy_ratio"].to_numpy(), [5.0 / 6.0, 1.0])
     np.testing.assert_allclose(matches["energy_response"].to_numpy(), [5.0 / 6.0, 1.0])
-    np.testing.assert_allclose(matches["model_energy_reco"].to_numpy(), [6.1, 9.5])
 
     predicted = evaluation.predicted.sort("cluster_id_pred")
     assert predicted["fake"].to_list() == [False, False, True, True]
-    assert predicted["model_x_reco"].to_list()[0] == 0.0
     np.testing.assert_allclose(predicted["centroid_x_reco"].to_list()[0], expected_pred1_xyz[0])
     assert "centroid_x_reco" in predicted.columns
     assert "sum_x_reco" not in predicted.columns
@@ -411,7 +386,7 @@ def test_greedy_matching_resolves_pred_then_truth_conflicts() -> None:
     assert matches == [(0, 1), (1, 2)]
 
 
-def test_oc_evaluation_without_regressions_keeps_nullable_model_columns() -> None:
+def test_oc_evaluation_has_no_model_reco_columns() -> None:
     beta = np.array([0.9, 0.8], dtype=np.float64)
     preds = np.zeros((1, 2, 3), dtype=np.float64)
     preds[0, :, 0] = _logit(beta)
@@ -428,8 +403,8 @@ def test_oc_evaluation_without_regressions_keeps_nullable_model_columns() -> Non
         max_match_distance=1.0,
     )
 
-    assert evaluation.predicted["model_energy_reco"].to_list() == [None]
-    assert evaluation.matches["model_x_reco"].to_list() == [None]
+    assert "model_energy_reco" not in evaluation.predicted.columns
+    assert "model_x_reco" not in evaluation.matches.columns
 
 
 def test_oc_evaluation_requires_physical_hit_features() -> None:

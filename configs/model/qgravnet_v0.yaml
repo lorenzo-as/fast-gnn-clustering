@@ -8,7 +8,7 @@ n_dimensions: 4
 n_filters: 8
 n_propagate: 8
 n_postgn_dense_blocks: 2
-output_dim: 3
+output_dim: 8
 output_head: oc
 output_layout:
   beta:
@@ -17,7 +17,9 @@ output_layout:
   cluster_space:
     start: 1
     dim: 2
-  regressions: []
+  payload:
+    start: 3
+    dim: 5
 distance_metric: l1
 neighbour_selector: full
 
