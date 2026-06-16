@@ -6,6 +6,7 @@ from fastgnn.evaluation.oc_metrics import (
     _matched_positions,
     binned_efficiency,
     binned_fake_rate,
+    decode_payload_predictions,
     evaluate_oc_padded,
     grid_search_thresholds,
 )
@@ -57,6 +58,107 @@ def test_output_layout_rejects_dimension_mismatch() -> None:
                 },
             }
         )
+
+
+def test_decode_payload_predictions_inverts_training_transforms() -> None:
+    payload = np.array([[[np.log(5.0), 1.25, np.sin(0.4), np.cos(0.4), 0.8]]])
+    decoded = decode_payload_predictions(
+        payload,
+        [
+            {"name": "log_sum_et", "field": "sum_et", "transform": "log"},
+            {"name": "eta", "field": "eta_energy_weighted", "transform": "identity"},
+            {"name": "phi", "field": "phi_energy_weighted", "transform": "sin_cos"},
+            {"name": "z", "field": "z_energy_weighted", "transform": "scale", "scale": 100.0},
+        ],
+    )
+
+    assert decoded is not None
+    np.testing.assert_allclose(decoded["et"], [[5.0]])
+    np.testing.assert_allclose(decoded["eta"], [[1.25]])
+    np.testing.assert_allclose(decoded["phi"], [[0.4]])
+    np.testing.assert_allclose(decoded["z"], [[80.0]])
+    np.testing.assert_allclose(decoded["energy"], [[5.0 * np.cosh(1.25)]])
+    np.testing.assert_allclose(decoded["phi_sin_cos_norm"], [[1.0]])
+
+
+def test_oc_evaluation_adds_seed_hit_payload_regression_columns() -> None:
+    beta = np.array([0.90, 0.60, 0.85, 0.70], dtype=np.float64)
+    coords = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [0.1, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [10.1, 0.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    payload_quantities = [
+        {"name": "log_sum_et", "field": "sum_et", "transform": "log"},
+        {"name": "eta", "field": "eta_energy_weighted", "transform": "identity"},
+        {"name": "phi", "field": "phi_energy_weighted", "transform": "sin_cos"},
+        {"name": "z", "field": "z_energy_weighted", "transform": "scale", "scale": 100.0},
+    ]
+    preds = np.zeros((1, 4, 9), dtype=np.float64)
+    preds[0, :, 0] = _logit(beta)
+    preds[0, :, 1:4] = coords
+    preds[0, :, 4:9] = [
+        [np.log(5.0), 0.0, 0.0, 1.0, 0.0],
+        [np.log(99.0), 9.0, 0.0, 1.0, 9.0],
+        [np.log(8.0), 0.0, 0.0, 1.0, 0.0],
+        [np.log(99.0), 9.0, 0.0, 1.0, 9.0],
+    ]
+    features = np.array(
+        [
+            [
+                [100.0, 0.0, 0.0, 2.0],
+                [100.0, 0.0, 0.0, 3.0],
+                [200.0, 0.0, 0.0, 4.0],
+                [200.0, 0.0, 0.0, 4.0],
+            ]
+        ],
+        dtype=np.float64,
+    )
+    labels = np.array([[1, 1, 2, 2]], dtype=np.int32)
+    mask = np.ones((1, 4), dtype=bool)
+    layout = OCOutputLayout.from_config(
+        {
+            "output_dim": 9,
+            "output_layout": {
+                "beta": {"index": 0, "activation": "sigmoid"},
+                "cluster_space": {"start": 1, "dim": 3},
+                "payload": {"start": 4, "dim": 5},
+            },
+        }
+    )
+
+    evaluation = evaluate_oc_padded(
+        preds=preds,
+        hit_object_id=labels,
+        mask=mask,
+        features=features,
+        feature_names=["x", "y", "z", "energy"],
+        tbeta=0.5,
+        td=0.5,
+        layout=layout,
+        payload_quantities=payload_quantities,
+        max_match_distance=0.1,
+        min_energy_ratio=0.5,
+        max_energy_ratio=2.0,
+        matching_reference="payload",
+    )
+
+    predicted = evaluation.predicted.sort("cluster_id_pred")
+    np.testing.assert_allclose(predicted["payload_et_pred"].to_numpy(), [5.0, 8.0])
+    np.testing.assert_allclose(predicted["payload_z_pred"].to_numpy(), [0.0, 0.0])
+
+    matches = evaluation.matches.sort("object_id")
+    assert matches["matching_reference"].to_list() == ["payload", "payload"]
+    np.testing.assert_allclose(matches["payload_et_response"].to_numpy(), [1.0, 1.0])
+    np.testing.assert_allclose(
+        matches["payload_relative_et_residual"].to_numpy(),
+        [0.0, 0.0],
+        atol=1e-12,
+    )
 
 
 def test_oc_evaluation_seed_matching_by_xyz_distance_and_binned_rates() -> None:

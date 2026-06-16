@@ -76,6 +76,7 @@ class _EventEval:
     labels: np.ndarray
     beta: np.ndarray
     coords: np.ndarray
+    payload_features: dict[str, np.ndarray] | None
     features: dict[str, np.ndarray]
     tbeta: float
     td: float
@@ -84,6 +85,7 @@ class _EventEval:
     max_energy_ratio: float
     matching_algorithm: str
     hungarian_energy_ratio_log_weight: float
+    matching_reference: str
     n_valid_hits: int
     clustering: np.ndarray
     truth_ids: np.ndarray
@@ -102,6 +104,7 @@ class _EventEval:
         *,
         beta: np.ndarray,
         cluster_coords: np.ndarray,
+        payload_features: dict[str, np.ndarray] | None,
         hit_object_id: np.ndarray,
         mask: np.ndarray | None,
         features: np.ndarray,
@@ -115,16 +118,26 @@ class _EventEval:
         max_energy_ratio: float,
         matching_algorithm: str,
         hungarian_energy_ratio_log_weight: float,
+        matching_reference: str,
     ) -> _EventEval:
         valid = np.ones(len(hit_object_id), dtype=bool) if mask is None else mask.astype(bool)
         labels = np.asarray(hit_object_id[valid], dtype=np.int32)
         beta_v = np.asarray(beta[valid], dtype=np.float64)
         coords_v = np.asarray(cluster_coords[valid], dtype=np.float64)
+        payload_features_v = (
+            None
+            if payload_features is None
+            else {
+                key: np.asarray(values[valid], dtype=np.float64)
+                for key, values in payload_features.items()
+            }
+        )
         features_v = np.asarray(features[valid], dtype=np.float64)
         physical_hits = {
             name: _required_feature(features_v, feature_names, name)
             for name in ("x", "y", "z", "energy")
         }
+        matching_reference = _validate_matching_reference(matching_reference, payload_features_v)
 
         clustering = get_clustering_np(beta_v, coords_v, tbeta=tbeta, td=td)
         truth_ids = np.unique(labels[labels > 0]).astype(np.int32)
@@ -142,6 +155,7 @@ class _EventEval:
             labels=labels,
             beta=beta_v,
             coords=coords_v,
+            payload_features=payload_features_v,
             features=physical_hits,
             tbeta=tbeta,
             td=td,
@@ -150,6 +164,7 @@ class _EventEval:
             max_energy_ratio=max_energy_ratio,
             matching_algorithm=_validate_matching_algorithm(matching_algorithm),
             hungarian_energy_ratio_log_weight=float(hungarian_energy_ratio_log_weight),
+            matching_reference=matching_reference,
             n_valid_hits=int(valid.sum()),
             clustering=clustering,
             truth_ids=truth_ids,
@@ -188,6 +203,101 @@ class _ThresholdScanEvent:
         return float(self.truth_et.sum())
 
 
+def decode_payload_predictions(
+    payload: np.ndarray | None,
+    payload_quantities: list[dict[str, Any]] | None,
+) -> dict[str, np.ndarray] | None:
+    """Invert configured payload target transforms into physical quantities."""
+    if payload is None or not payload_quantities:
+        return None
+    payload = np.asarray(payload, dtype=np.float64)
+    quantities = list(payload_quantities)
+    out: dict[str, np.ndarray] = {}
+    cursor = 0
+    for quantity in quantities:
+        field = str(quantity["field"])
+        name = str(quantity.get("name", field))
+        transform = str(quantity.get("transform", "identity"))
+        if transform == "identity":
+            values = payload[..., cursor]
+            cursor += 1
+        elif transform == "log":
+            epsilon = float(quantity.get("epsilon", 0.0))
+            values = np.exp(payload[..., cursor]) - epsilon
+            cursor += 1
+        elif transform == "scale":
+            values = payload[..., cursor] * float(quantity.get("scale", 1.0))
+            cursor += 1
+        elif transform == "sin_cos":
+            sin_values = payload[..., cursor]
+            cos_values = payload[..., cursor + 1]
+            values = np.arctan2(sin_values, cos_values)
+            out[f"{name}_sin"] = sin_values
+            out[f"{name}_cos"] = cos_values
+            out[f"{name}_sin_cos_norm"] = np.hypot(sin_values, cos_values)
+            cursor += 2
+        else:
+            raise ValueError(f"Unknown payload transform {transform!r}")
+        out[field] = values
+        out[name] = values
+
+    if cursor != payload.shape[-1]:
+        raise ValueError(
+            "Configured payload quantities do not consume model payload dimension: "
+            f"consumed {cursor}, payload dim is {payload.shape[-1]}"
+        )
+    _add_standard_payload_aliases(out)
+    return out
+
+
+def _payload_specs_are_correction(payload_quantities: list[dict[str, Any]] | None) -> bool:
+    return bool(payload_quantities) and any("correction" in q for q in payload_quantities)
+
+
+def decode_payload_corrections(
+    payload: np.ndarray | None,
+    payload_quantities: list[dict[str, Any]] | None,
+    features: np.ndarray,
+    feature_names: list[str],
+    *,
+    max_log_corr: float = 3.0,
+) -> dict[str, np.ndarray] | None:
+    """Apply per-hit corrections to each hit's own seed feature -> physical payloads.
+
+    Mirrors the training-time correction: ``E_T = seed * exp(a*tanh r)`` and
+    ``x = seed + s*r`` (wrapped for angles). The seed is the hit's own input
+    feature named by ``seed``; ``features`` must contain those columns.
+    """
+    if payload is None or not payload_quantities:
+        return None
+    payload = np.asarray(payload, dtype=np.float64)
+    features = np.asarray(features, dtype=np.float64)
+    out: dict[str, np.ndarray] = {}
+    for index, quantity in enumerate(payload_quantities):
+        seed_name = str(quantity["seed"])
+        target = str(quantity["target"])
+        name = str(quantity.get("name", target))
+        correction = str(quantity["correction"])
+        if seed_name not in feature_names:
+            raise ValueError(
+                f"Correction seed feature {seed_name!r} is not in eval features {feature_names}"
+            )
+        seed = features[..., feature_names.index(seed_name)]
+        r = payload[..., index]
+        if correction == "mul_exp_tanh":
+            values = seed * np.exp(float(quantity.get("a", max_log_corr)) * np.tanh(r))
+        elif correction in ("additive", "additive_circular"):
+            values = seed + float(quantity.get("s", 1.0)) * r
+            if correction == "additive_circular":
+                values = (values + np.pi) % (2 * np.pi) - np.pi
+        else:
+            raise ValueError(f"Unknown payload correction {correction!r}")
+        out[target] = values
+        out[name] = values
+    _add_standard_payload_aliases(out)
+    return out
+
+
 def evaluate_oc_padded(
     *,
     preds: np.ndarray,
@@ -199,12 +309,14 @@ def evaluate_oc_padded(
     td: float,
     layout: OCOutputLayout | None = None,
     model_cfg: dict[str, Any] | None = None,
+    payload_quantities: list[dict[str, Any]] | None = None,
     events: list[EventRecord] | None = None,
     max_match_distance: float = 10.0,
     min_energy_ratio: float = 0.5,
     max_energy_ratio: float = 2.0,
     matching_algorithm: str = "hungarian",
     hungarian_energy_ratio_log_weight: float = 0.0,
+    matching_reference: str = "aggregated",
 ) -> OCEvaluation:
     """
     Evaluate OC predictions on a padded batch.
@@ -215,12 +327,21 @@ def evaluate_oc_padded(
     layout = layout or (OCOutputLayout.from_config(model_cfg) if model_cfg is not None else None)
     layout = layout or OCOutputLayout.from_output_dim(int(preds.shape[-1]))
     outputs = split_oc_outputs(preds, layout)
+    if _payload_specs_are_correction(payload_quantities):
+        payload_features = decode_payload_corrections(
+            outputs.payload, payload_quantities, features, feature_names
+        )
+    else:
+        payload_features = decode_payload_predictions(outputs.payload, payload_quantities)
 
     return _concat_evaluations(
         [
             evaluate_oc_event(
                 beta=np.asarray(outputs.beta[event_idx]),
                 cluster_coords=np.asarray(outputs.cluster_coords[event_idx]),
+                payload_features=None
+                if payload_features is None
+                else {key: np.asarray(value[event_idx]) for key, value in payload_features.items()},
                 hit_object_id=np.asarray(hit_object_id[event_idx]),
                 mask=np.asarray(mask[event_idx], dtype=bool),
                 features=np.asarray(features[event_idx]),
@@ -234,6 +355,7 @@ def evaluate_oc_padded(
                 max_energy_ratio=max_energy_ratio,
                 matching_algorithm=matching_algorithm,
                 hungarian_energy_ratio_log_weight=hungarian_energy_ratio_log_weight,
+                matching_reference=matching_reference,
             )
             for event_idx in range(preds.shape[0])
         ]
@@ -244,6 +366,7 @@ def evaluate_oc_event(
     *,
     beta: np.ndarray,
     cluster_coords: np.ndarray,
+    payload_features: dict[str, np.ndarray] | None = None,
     hit_object_id: np.ndarray,
     mask: np.ndarray | None,
     features: np.ndarray,
@@ -257,11 +380,13 @@ def evaluate_oc_event(
     max_energy_ratio: float = 2.0,
     matching_algorithm: str = "hungarian",
     hungarian_energy_ratio_log_weight: float = 0.0,
+    matching_reference: str = "aggregated",
 ) -> OCEvaluation:
     """Evaluate one padded or unpadded event."""
     ctx = _EventEval.build(
         beta=beta,
         cluster_coords=cluster_coords,
+        payload_features=payload_features,
         hit_object_id=hit_object_id,
         mask=mask,
         features=features,
@@ -275,6 +400,7 @@ def evaluate_oc_event(
         max_energy_ratio=max_energy_ratio,
         matching_algorithm=matching_algorithm,
         hungarian_energy_ratio_log_weight=hungarian_energy_ratio_log_weight,
+        matching_reference=matching_reference,
     )
     truth_rows = _truth_rows(ctx)
     pred_rows = _pred_rows(ctx)
@@ -521,6 +647,7 @@ def _pred_rows(ctx: _EventEval) -> list[dict[str, Any]]:
             "matched": False,
             "fake": True,
         }
+        row.update(_payload_pred_columns(ctx, seed_index))
         rows.append(row)
     return rows
 
@@ -562,14 +689,7 @@ def _match_rows(ctx: _EventEval) -> list[dict[str, Any]]:
     pred_energy = np.asarray(
         [ctx.energy[ctx.clustering == seed_index].sum() for seed_index in ctx.seed_indices]
     )
-    centroid_distance = cdist(_xyz_array(ctx.truth_reco, ctx.truth_ids), _pred_xyz_array(ctx))
-    centroid_distance[~np.isfinite(centroid_distance)] = np.inf
-    energy_ratio = np.divide(
-        pred_energy[None, :],
-        truth_energy[:, None],
-        out=np.full((len(ctx.truth_ids), len(ctx.seed_indices)), np.inf),
-        where=truth_energy[:, None] > 0,
-    )
+    centroid_distance, energy_ratio = _matching_matrices(ctx, truth_energy, pred_energy)
     valid_match = (
         (centroid_distance <= ctx.max_match_distance)
         & (energy_ratio >= ctx.min_energy_ratio)
@@ -609,6 +729,7 @@ def _match_rows(ctx: _EventEval) -> list[dict[str, Any]]:
             "object_id": truth_id,
             "cluster_id_pred": pred_id,
             "seed_hit_idx": seed_index,
+            "matching_reference": ctx.matching_reference,
             "beta_seed": float(ctx.beta[seed_index]),
             "centroid_distance": float(centroid_distance[truth_pos, pred_pos]),
             "energy_ratio": float(energy_ratio[truth_pos, pred_pos]),
@@ -658,6 +779,7 @@ def _match_rows(ctx: _EventEval) -> list[dict[str, Any]]:
             if pred_centroid["eta"] is None or truth_eta is None or dphi is None
             else float(np.hypot(pred_centroid["eta"] - truth_eta, dphi)),
         }
+        row.update(_payload_match_columns(ctx, seed_index, truth_ref_energy, truth_centroid))
         rows.append(row)
     return rows
 
@@ -731,6 +853,81 @@ def _pred_xyz_array(ctx: _EventEval) -> np.ndarray:
         ],
         dtype=np.float64,
     )
+
+
+def _matching_matrices(
+    ctx: _EventEval,
+    truth_energy: np.ndarray,
+    pred_energy: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    if ctx.matching_reference == "aggregated":
+        centroid_distance = cdist(_xyz_array(ctx.truth_reco, ctx.truth_ids), _pred_xyz_array(ctx))
+        centroid_distance[~np.isfinite(centroid_distance)] = np.inf
+        energy_ratio = np.divide(
+            pred_energy[None, :],
+            truth_energy[:, None],
+            out=np.full((len(ctx.truth_ids), len(ctx.seed_indices)), np.inf),
+            where=truth_energy[:, None] > 0,
+        )
+        return centroid_distance, energy_ratio
+
+    pred_payloads = [_payload_seed_reco(ctx, int(seed_index)) for seed_index in ctx.seed_indices]
+    centroid_distance = _payload_distance_matrix(ctx, pred_payloads)
+    truth_et = np.asarray(
+        [_none_to_nan(ctx.truth_reco[int(truth_id)]["et"]) for truth_id in ctx.truth_ids],
+        dtype=np.float64,
+    )
+    pred_et = np.asarray(
+        [_none_to_nan(payload.get("et")) for payload in pred_payloads],
+        dtype=np.float64,
+    )
+    energy_ratio = np.divide(
+        pred_et[None, :],
+        truth_et[:, None],
+        out=np.full((len(ctx.truth_ids), len(ctx.seed_indices)), np.inf),
+        where=truth_et[:, None] > 0,
+    )
+    return centroid_distance, energy_ratio
+
+
+def _payload_distance_matrix(
+    ctx: _EventEval,
+    pred_payloads: list[dict[str, float | None]],
+) -> np.ndarray:
+    distances = np.full((len(ctx.truth_ids), len(pred_payloads)), np.inf, dtype=np.float64)
+    for truth_pos, truth_id_np in enumerate(ctx.truth_ids):
+        truth = ctx.truth_reco[int(truth_id_np)]
+        for pred_pos, pred in enumerate(pred_payloads):
+            distances[truth_pos, pred_pos] = _payload_position_distance(truth, pred)
+    return distances
+
+
+def _payload_position_distance(
+    truth: dict[str, float | None],
+    pred: dict[str, float | None],
+) -> float:
+    if all(pred.get(axis) is not None for axis in ("x", "y", "z")):
+        return float(
+            np.linalg.norm(
+                [
+                    float(pred[axis]) - float(truth[axis])
+                    for axis in ("x", "y", "z")
+                    if truth[axis] is not None
+                ]
+            )
+        )
+    if pred.get("eta") is None or pred.get("phi") is None:
+        return np.inf
+    if truth["eta"] is None or truth["phi"] is None:
+        return np.inf
+    components = [float(pred["eta"]) - float(truth["eta"])]
+    dphi = _delta_phi(pred["phi"], truth["phi"])
+    if dphi is None:
+        return np.inf
+    components.append(dphi)
+    if pred.get("z") is not None and truth["z"] is not None:
+        components.append((float(pred["z"]) - float(truth["z"])) / 100.0)
+    return float(np.linalg.norm(components))
 
 
 def _overlap_matrices(ctx: _EventEval) -> tuple[np.ndarray, np.ndarray]:
@@ -816,6 +1013,27 @@ def _validate_matching_algorithm(algorithm: str) -> str:
     if algorithm not in {"hungarian", "greedy"}:
         raise ValueError("matching_algorithm must be 'hungarian' or 'greedy'")
     return algorithm
+
+
+def _validate_matching_reference(
+    matching_reference: str,
+    payload_features: dict[str, np.ndarray] | None,
+) -> str:
+    matching_reference = str(matching_reference).lower()
+    if matching_reference not in {"aggregated", "payload"}:
+        raise ValueError("matching_reference must be 'aggregated' or 'payload'")
+    if matching_reference == "payload":
+        if payload_features is None:
+            raise ValueError("matching_reference='payload' requires decoded payload predictions")
+        if "et" not in payload_features:
+            raise ValueError("matching_reference='payload' requires an ET payload quantity")
+        if not (
+            {"x", "y", "z"}.issubset(payload_features) or {"eta", "phi"}.issubset(payload_features)
+        ):
+            raise ValueError(
+                "matching_reference='payload' requires either x/y/z or eta/phi payload quantities"
+            )
+    return matching_reference
 
 
 def _event_labels(hit_object_id: np.ndarray, mask: np.ndarray | None, event_idx: int) -> np.ndarray:
@@ -1135,6 +1353,89 @@ def _required_feature(features: np.ndarray, feature_names: list[str], name: str)
             f"Available evaluation features: {', '.join(feature_names)}"
         )
     return np.asarray(features[:, feature_names.index(name)], dtype=np.float64)
+
+
+def _add_standard_payload_aliases(out: dict[str, np.ndarray]) -> None:
+    aliases = {
+        "sum_et": "et",
+        "et": "et",
+        "sum_energy": "energy",
+        "energy": "energy",
+        "eta_energy_weighted": "eta",
+        "eta": "eta",
+        "phi_energy_weighted": "phi",
+        "phi": "phi",
+        "z_energy_weighted": "z",
+        "z": "z",
+        "x_energy_weighted": "x",
+        "x": "x",
+        "y_energy_weighted": "y",
+        "y": "y",
+    }
+    for source, target in aliases.items():
+        if source in out and target not in out:
+            out[target] = out[source]
+    if "energy" not in out and "et" in out and "eta" in out:
+        out["energy"] = out["et"] * np.cosh(out["eta"])
+
+
+def _payload_seed_reco(ctx: _EventEval, seed_index: int) -> dict[str, float | None]:
+    if ctx.payload_features is None:
+        return {}
+    keys = ("energy", "et", "x", "y", "z", "eta", "phi")
+    return {
+        key: _none_if_nan(float(ctx.payload_features[key][seed_index]))
+        for key in keys
+        if key in ctx.payload_features
+    }
+
+
+def _payload_pred_columns(ctx: _EventEval, seed_index: int) -> dict[str, float | None]:
+    payload = _payload_seed_reco(ctx, seed_index)
+    return {
+        f"payload_{key}_pred": payload.get(key)
+        for key in ("energy", "et", "x", "y", "z", "eta", "phi")
+    }
+
+
+def _payload_match_columns(
+    ctx: _EventEval,
+    seed_index: int,
+    truth_ref_energy: float | None,
+    truth_centroid: dict[str, float | None],
+) -> dict[str, float | None]:
+    payload = _payload_seed_reco(ctx, seed_index)
+    if not payload:
+        return {}
+
+    dphi = _delta_phi(truth_centroid["phi"], payload.get("phi"))
+    out = _payload_pred_columns(ctx, seed_index)
+    out.update(
+        {
+            "payload_energy_response": _safe_none_ratio(payload.get("energy"), truth_ref_energy),
+            "payload_et_response": _safe_none_ratio(payload.get("et"), truth_centroid["et"]),
+            "payload_relative_energy_residual": _safe_none_ratio(
+                _none_subtract(payload.get("energy"), truth_ref_energy), truth_ref_energy
+            ),
+            "payload_relative_et_residual": _safe_none_ratio(
+                _none_subtract(payload.get("et"), truth_centroid["et"]), truth_centroid["et"]
+            ),
+            "payload_eta_residual": _none_subtract(truth_centroid["eta"], payload.get("eta")),
+            "payload_phi_residual": dphi,
+            "payload_z_residual": _none_subtract(truth_centroid["z"], payload.get("z")),
+            "payload_relative_eta_residual": _safe_none_ratio(
+                _none_subtract(truth_centroid["eta"], payload.get("eta")), truth_centroid["eta"]
+            ),
+            "payload_relative_phi_residual": _safe_none_ratio(dphi, truth_centroid["phi"]),
+            "payload_relative_z_residual": _safe_none_ratio(
+                _none_subtract(truth_centroid["z"], payload.get("z")), truth_centroid["z"]
+            ),
+            "payload_delta_r": None
+            if payload.get("eta") is None or truth_centroid["eta"] is None or dphi is None
+            else float(np.hypot(payload["eta"] - truth_centroid["eta"], dphi)),
+        }
+    )
+    return out
 
 
 def _truth_object_props(event: EventRecord | None, truth_id: int) -> dict[str, Any]:

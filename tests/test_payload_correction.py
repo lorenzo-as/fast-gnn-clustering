@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import tensorflow as tf
 
 from fastgnn.data.base import _build_payload_correction_targets, _build_payload_seeds
+from fastgnn.evaluation.oc_metrics import decode_payload_corrections
 from fastgnn.training.objectcondensation_loss import calc_payload_correction_loss
 
 SPECS = [
@@ -193,3 +195,28 @@ def test_build_seeds_and_correction_targets() -> None:
     assert targets[3, 0] == 0.0
     # energy-weighted eta of object 1 (equal energies) = mean(2.0, 2.2)
     assert np.isclose(targets[0, 1], 2.1, atol=1e-5)
+
+
+def test_decode_payload_corrections_reconstructs_from_own_features() -> None:
+    # eval features carry the seed columns (et, eta, phi, z); one event, two hits.
+    feature_names = ["et", "eta", "phi", "z"]
+    features = np.array([[[4.0, 2.0, 3.10, 330.0], [1.0, 1.5, 0.0, 400.0]]], np.float64)
+    # r=0 on the first hit -> corrected == own feature; nonzero r on the second.
+    payload = np.array([[[0.0, 0.0, 0.0, 0.0], [0.5, 0.1, 0.0, 2.0]]], np.float64)
+    out = decode_payload_corrections(payload, SPECS, features, feature_names)
+
+    # hit 0: r=0 -> exp(0)=1 and additive offsets 0 -> recover the seed features.
+    assert np.isclose(out["et"][0, 0], 4.0)
+    assert np.isclose(out["eta"][0, 0], 2.0)
+    assert np.isclose(out["z"][0, 0], 330.0)
+    # energy alias derived from et and eta.
+    assert np.isclose(out["energy"][0, 0], 4.0 * np.cosh(2.0))
+    # hit 1: mul_exp_tanh and additive corrections applied to its own seed.
+    assert np.isclose(out["et"][0, 1], 1.0 * np.exp(3.0 * np.tanh(0.5)))
+    assert np.isclose(out["eta"][0, 1], 1.5 + 0.1)
+    assert np.isclose(out["z"][0, 1], 400.0 + 2.0)
+
+
+def test_decode_payload_corrections_requires_seed_features() -> None:
+    with pytest.raises(ValueError, match="seed feature"):
+        decode_payload_corrections(np.zeros((1, 1, 4)), SPECS, np.zeros((1, 1, 1)), ["energy"])
