@@ -24,9 +24,12 @@ def resolve_project_path(path: str | Path) -> Path:
 PLOTTING_CONFIG = {
     "figsize": {
         "A4": {
-            "fullwidth_3pane": (16, 5),
+            "fullwidth_1pane": (16, 9),
             "fullwidth_2pane": (16, 7),
+            "fullwidth_3pane": (16, 5),
             "halfwidth": (8, 5),
+            # width of one CMS-styled panel; grids scale height by row count
+            "panel": (5.3, 4.2),
         }
     }
 }

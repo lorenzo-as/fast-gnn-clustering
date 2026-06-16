@@ -133,6 +133,7 @@ force-sort-within-sections = true
   "RUF005"
 ]
 "scripts/**/*.py" = ["T20"]
+"plotting/**/*.py" = ["T20"]
 "tests/**/*.py" = ["ARG", "S101", "T20"]
 
 [tool.pytest.ini_options]
