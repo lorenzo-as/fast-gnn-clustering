@@ -29,6 +29,8 @@ import awkward as ak
 import numpy as np
 import yaml
 
+from fastgnn.data.object_properties import compute_object_properties
+
 Split = Literal["train", "val", "test"]
 
 BATCH_KEYS = ["features", "hit_object_id"]
@@ -153,11 +155,18 @@ class EventRecord:
             "hit_object_id": self.truth.hit_object_id.astype(np.int32),
         }
         if payload_quantities:
-            out["payload_targets"] = _build_payload_targets(
-                self.truth.hit_object_id,
-                self.truth.objects,
-                payload_quantities,
-            )
+            quantities = list(payload_quantities)
+            if _payload_is_correction(quantities):
+                out["payload_targets"] = _build_payload_correction_targets(
+                    self.truth.hit_object_id, self.hits, quantities
+                )
+                out["payload_seeds"] = _build_payload_seeds(self.hits, quantities)
+            else:
+                out["payload_targets"] = _build_payload_targets(
+                    self.truth.hit_object_id,
+                    self.truth.objects,
+                    quantities,
+                )
         if "energy" in self.hits:
             out["_hit_energy"] = self.hits.energy.astype(np.float32)
         return out
@@ -475,7 +484,9 @@ class PadCollator:
 
         if self.payload_quantities:
             # payload_targets is always present; payload_seeds only in correction mode.
-            payload_keys = [k for k in ("payload_targets", "payload_seeds") if k in training_events[0]]
+            payload_keys = [
+                k for k in ("payload_targets", "payload_seeds") if k in training_events[0]
+            ]
             for payload_key in payload_keys:
                 arrays = []
                 for event, order in zip(training_events, orders, strict=True):
@@ -506,9 +517,7 @@ class PadCollator:
         elif "energy" in self.feature_names:
             energy = event["features"][:, self.feature_names.index("energy")]
         else:
-            raise ValueError(
-                "truncate='energy_desc' requires stored hits.energy"
-            )
+            raise ValueError("truncate='energy_desc' requires stored hits.energy")
         return np.argsort(-energy)
 
 
@@ -577,14 +586,54 @@ def _build_payload_targets(
         if field not in truth_objects:
             available = ", ".join(truth_objects.fields) or "<none>"
             raise KeyError(
-                f"Missing payload truth.objects field {field!r}. "
-                f"Available fields: {available}"
+                f"Missing payload truth.objects field {field!r}. Available fields: {available}"
             )
         raw = np.asarray(truth_objects[field], dtype=np.float32)[object_rows]
         transformed = _transform_payload_target(raw, quantity)
         dim = transformed.shape[-1]
         targets[signal, cursor : cursor + dim] = transformed
         cursor += dim
+    return targets
+
+
+def _payload_is_correction(payload_quantities: Iterable[Mapping[str, Any]]) -> bool:
+    """Correction-mode quantities carry a per-hit ``seed`` field and a ``correction`` rule."""
+    return any("correction" in quantity for quantity in payload_quantities)
+
+
+def _build_payload_seeds(
+    hits: Mapping[str, Any],
+    payload_quantities: Iterable[Mapping[str, Any]],
+) -> np.ndarray:
+    """Per-hit seed payloads: each hit's own input feature named by ``seed``."""
+    return np.stack(
+        [np.asarray(hits[str(q["seed"])], dtype=np.float32) for q in payload_quantities],
+        axis=1,
+    )
+
+
+def _build_payload_correction_targets(
+    hit_object_id: np.ndarray,
+    hits: Mapping[str, Any],
+    payload_quantities: Iterable[Mapping[str, Any]],
+) -> np.ndarray:
+    """Broadcast each hit's truth-cluster aggregate (``target`` object property) to that hit."""
+    hit_object_id = np.asarray(hit_object_id, dtype=np.int32)
+    quantities = list(payload_quantities)
+    targets = np.zeros((len(hit_object_id), len(quantities)), dtype=np.float32)
+    signal = hit_object_id > NOISE_OBJECT_ID
+    if not np.any(signal):
+        return targets
+    n_objects = int(hit_object_id[signal].max())
+    properties = compute_object_properties(
+        hits,
+        hit_object_id,
+        object_ids=np.arange(1, n_objects + 1),
+        properties=tuple(dict.fromkeys(str(q["target"]) for q in quantities)),
+    )
+    object_rows = hit_object_id[signal] - 1
+    for index, quantity in enumerate(quantities):
+        targets[signal, index] = properties[str(quantity["target"])][object_rows]
     return targets
 
 

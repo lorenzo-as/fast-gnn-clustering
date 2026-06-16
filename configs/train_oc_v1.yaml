@@ -1,0 +1,16 @@
+defaults:
+  - data: cmssw_processed_v1
+  - model: gravnet_v0_correction
+  - training: oc_v1
+  - payload@training.payload: correction
+  - _self_
+
+seed: 0
+run_name: null
+output_dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+hydra:
+  run:
+    dir: ${output_dir}
+  job:
+    chdir: false

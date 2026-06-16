@@ -19,6 +19,7 @@ from fastgnn.data.base import CaloDataset
 from .objectcondensation_loss import (
     batch_and_mask_to_flat,
     calc_LV_Lbeta,
+    calc_payload_correction_loss,
     calc_payload_loss,
     formatted_loss_components_string,
 )
@@ -292,10 +293,13 @@ def _payload_flat_inputs(
         )
     if output_slices.payload is None:
         raise ValueError("Configured payload layout but split outputs did not produce payload")
-    return {
+    flat_inputs = {
         "payload_predictions": output_slices.payload,
         "payload_targets": batch_tensors["payload_targets"],
     }
+    if "payload_seeds" in batch_tensors:  # correction mode
+        flat_inputs["payload_seeds"] = batch_tensors["payload_seeds"]
+    return flat_inputs
 
 
 def _add_payload_components(
@@ -310,15 +314,27 @@ def _add_payload_components(
         return
     if output_layout.payload is None:
         raise ValueError("training.payload.quantities requires model.payload_output_dim > 0")
-    payload_components = calc_payload_loss(
-        payload_predictions=flat["payload_predictions"],
-        payload_targets=flat["payload_targets"],
-        cluster_index_per_event=tf.cast(flat["hit_object_id"], tf.int32),
-        batch=batch_idx,
-        payload_specs=payload_quantities,
-        huber_delta=float((train_cfg.get("payload") or {}).get("huber_delta", 1.0)),
-        return_components=True,
-    )
+    payload_cfg = train_cfg.get("payload") or {}
+    common = {
+        "payload_predictions": flat["payload_predictions"],
+        "payload_targets": flat["payload_targets"],
+        "cluster_index_per_event": tf.cast(flat["hit_object_id"], tf.int32),
+        "batch": batch_idx,
+        "payload_specs": payload_quantities,
+        "huber_delta": float(payload_cfg.get("huber_delta", 1.0)),
+        "return_components": True,
+    }
+    if str(payload_cfg.get("mode", "direct")) == "correction":
+        payload_components = calc_payload_correction_loss(
+            payload_seeds=flat["payload_seeds"],
+            beta=flat["beta"],
+            max_log_corr=float(payload_cfg.get("max_log_corr", 3.0)),
+            weighting=str(payload_cfg.get("weighting", "beta2")),
+            beta_detach=bool(payload_cfg.get("beta_detach", False)),
+            **common,
+        )
+    else:
+        payload_components = calc_payload_loss(**common)
     components.update(cast(dict[str, tf.Tensor], payload_components))
 
 

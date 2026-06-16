@@ -420,6 +420,36 @@ def calc_LV_Lbeta(
     return L_V / batch_size_f, L_beta / batch_size_f
 
 
+def _build_object_index(
+    cluster_index_per_event: tf.Tensor,
+    batch: tf.Tensor,
+    noise_cluster_index: int = 0,
+) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
+    """Map signal hits to global object indices for object-balanced aggregation.
+
+    Returns ``(is_sig, object_index, n_objects, n_hits_per_object, batch_object,
+    batch_size)`` where ``object_index`` is a global (batch-flattened) object id
+    per signal hit.
+    """
+    batch = tf.cast(batch, tf.int32)
+    cluster_index_per_event = tf.cast(cluster_index_per_event, tf.int32)
+    batch_size = tf.reduce_max(batch) + 1
+
+    is_sig = cluster_index_per_event > noise_cluster_index
+    object_index_per_event = tf.boolean_mask(cluster_index_per_event, is_sig) - 1
+    batch_sig = tf.boolean_mask(batch, is_sig)
+    n_objects_per_event = tf.cast(
+        tf.maximum(scatter_max_vals(object_index_per_event + 1, batch_sig, batch_size), 0),
+        tf.int32,
+    )
+    offsets_per_event = tf.concat([[0], tf.cumsum(n_objects_per_event)[:-1]], axis=0)
+    object_index = object_index_per_event + tf.gather(offsets_per_event, batch_sig)
+    n_objects = tf.reduce_sum(n_objects_per_event)
+    n_hits_per_object = tf.cast(scatter_count(object_index, n_objects), tf.float32)
+    batch_object = tf.repeat(tf.range(batch_size, dtype=tf.int32), n_objects_per_event)
+    return is_sig, object_index, n_objects, n_hits_per_object, batch_object, batch_size
+
+
 def calc_payload_loss(
     payload_predictions: tf.Tensor,
     payload_targets: tf.Tensor,
@@ -445,25 +475,9 @@ def calc_payload_loss(
         zero = tf.reduce_sum(payload_predictions) * 0.0
         return {"L_payload": zero} if return_components else zero
 
-    batch = tf.cast(batch, tf.int32)
-    cluster_index_per_event = tf.cast(cluster_index_per_event, tf.int32)
-    batch_size = tf.reduce_max(batch) + 1
-
-    is_sig = cluster_index_per_event > noise_cluster_index
-    object_index_per_event = tf.boolean_mask(cluster_index_per_event, is_sig) - 1
-    batch_sig = tf.boolean_mask(batch, is_sig)
-    n_objects_per_event = tf.cast(
-        tf.maximum(
-            scatter_max_vals(object_index_per_event + 1, batch_sig, batch_size),
-            0,
-        ),
-        tf.int32,
+    is_sig, object_index, n_objects, n_hits_per_object, batch_object, batch_size = (
+        _build_object_index(cluster_index_per_event, batch, noise_cluster_index)
     )
-    offsets_per_event = tf.concat([[0], tf.cumsum(n_objects_per_event)[:-1]], axis=0)
-    object_index = object_index_per_event + tf.gather(offsets_per_event, batch_sig)
-    n_objects = tf.reduce_sum(n_objects_per_event)
-    n_hits_per_object = tf.cast(scatter_count(object_index, n_objects), tf.float32)
-    batch_object = tf.repeat(tf.range(batch_size, dtype=tf.int32), n_objects_per_event)
 
     pred_sig = tf.boolean_mask(tf.cast(payload_predictions, tf.float32), is_sig)
     target_sig = tf.boolean_mask(tf.cast(payload_targets, tf.float32), is_sig)
@@ -520,6 +534,128 @@ def _object_balanced_mean(
     n_objects_per_event = tf.cast(scatter_count(batch_object, batch_size), tf.float32)
     per_event = safe_divide(per_event_sum, n_objects_per_event)
     return tf.reduce_sum(per_event) / tf.cast(batch_size, tf.float32)
+
+
+def calc_payload_correction_loss(
+    payload_predictions: tf.Tensor,  # (n_hits, n_quantities) raw corrections r
+    payload_seeds: tf.Tensor,  # (n_hits, n_quantities) per-hit seed payloads
+    payload_targets: tf.Tensor,  # (n_hits, n_quantities) truth-cluster aggregates
+    beta: tf.Tensor,  # (n_hits,) condensation probability
+    cluster_index_per_event: tf.Tensor,
+    batch: tf.Tensor,
+    payload_specs: tuple | list,
+    *,
+    max_log_corr: float = 3.0,
+    huber_delta: float = 1.0,
+    weighting: str = "beta2",
+    beta_detach: bool = False,
+    epsilon: float = 1.0e-6,
+    noise_cluster_index: int = 0,
+    return_components: bool = False,
+) -> tf.Tensor | dict[str, tf.Tensor]:
+    """OC-style beta-weighted payload *correction* loss.
+
+    Each hit predicts a correction ``r`` applied to its own seed payload:
+    ``E_T = seed * exp(a * tanh r)`` (``mul_exp_tanh``) or ``x = seed + s * r``
+    (``additive`` / ``additive_circular``). Residuals are taken in log-space for
+    energy and as sigma-normalized differences for positions, then aggregated per
+    object with the OC charge weight ``xi`` (``beta**2`` or ``arctanh(beta)**2``)
+    so high-beta condensation candidates dominate. ``beta`` is not detached unless
+    ``beta_detach`` is set, so the loss also rewards high beta on well-predicted hits.
+    """
+    if noise_cluster_index != 0:
+        raise NotImplementedError("noise_cluster_index != 0 not supported")
+    if not payload_specs:
+        zero = tf.reduce_sum(payload_predictions) * 0.0
+        return {"L_payload": zero} if return_components else zero
+
+    is_sig, object_index, n_objects, _, _, _ = _build_object_index(
+        cluster_index_per_event, batch, noise_cluster_index
+    )
+    pred_sig = tf.boolean_mask(tf.cast(payload_predictions, tf.float32), is_sig)
+    seed_sig = tf.boolean_mask(tf.cast(payload_seeds, tf.float32), is_sig)
+    target_sig = tf.boolean_mask(tf.cast(payload_targets, tf.float32), is_sig)
+
+    beta_sig = tf.boolean_mask(tf.cast(beta, tf.float32), is_sig)
+    if beta_detach:
+        beta_sig = tf.stop_gradient(beta_sig)
+    xi = _oc_charge_weight(beta_sig, weighting)
+
+    total_per_hit = tf.zeros(tf.shape(object_index), dtype=tf.float32)
+    components: dict[str, tf.Tensor] = {}
+    for index, spec in enumerate(payload_specs):
+        name = str(_spec_value(spec, "name"))
+        weight = float(_spec_value(spec, "weight", 1.0))
+        residual = _correction_residual(
+            spec,
+            pred_sig[:, index],
+            seed_sig[:, index],
+            target_sig[:, index],
+            max_log_corr=max_log_corr,
+            epsilon=epsilon,
+        )
+        per_hit = weight * huber(residual, huber_delta)
+        total_per_hit += per_hit
+        components[f"L_payload_{name}"] = _beta_weighted_object_mean(
+            per_hit, xi, object_index, n_objects
+        )
+
+    L_payload = _beta_weighted_object_mean(total_per_hit, xi, object_index, n_objects)
+    if return_components:
+        return {"L_payload": L_payload, **components}
+    return L_payload
+
+
+def _correction_residual(
+    spec, r: tf.Tensor, seed: tf.Tensor, target: tf.Tensor, *, max_log_corr: float, epsilon: float
+) -> tf.Tensor:
+    """Per-hit residual for one correction quantity (see calc_payload_correction_loss)."""
+    correction = str(_spec_value(spec, "correction"))
+    if correction == "mul_exp_tanh":
+        a = float(_spec_value(spec, "a", max_log_corr))
+        eps = float(_spec_value(spec, "epsilon", epsilon))
+        pred = seed * tf.exp(a * tf.tanh(r))
+        return tf.math.log(pred + eps) - tf.math.log(target + eps)
+    if correction in ("additive", "additive_circular"):
+        s = float(_spec_value(spec, "s", 1.0))
+        sigma = float(_spec_value(spec, "sigma", 1.0))
+        diff = seed + s * r - target
+        if correction == "additive_circular":
+            diff = _wrap_angle(diff)
+        return diff / sigma
+    raise ValueError(
+        f"Unknown payload correction {correction!r}. "
+        "Available: mul_exp_tanh, additive, additive_circular"
+    )
+
+
+def _oc_charge_weight(beta: tf.Tensor, weighting: str) -> tf.Tensor:
+    """Per-hit OC charge weight xi from beta."""
+    beta = tf.clip_by_value(beta, 0.0, 1.0 - 1e-4)
+    if weighting == "beta2":
+        return beta**2
+    if weighting == "oc_charge":
+        return tf.math.atanh(beta) ** 2
+    raise ValueError(f"Unknown payload weighting {weighting!r}. Available: beta2, oc_charge")
+
+
+def _wrap_angle(delta: tf.Tensor) -> tf.Tensor:
+    """Wrap an angular difference to (-pi, pi]."""
+    return tf.math.floormod(delta + np.pi, 2.0 * np.pi) - np.pi
+
+
+def _beta_weighted_object_mean(
+    per_hit: tf.Tensor,
+    xi: tf.Tensor,
+    object_index: tf.Tensor,
+    n_objects: tf.Tensor,
+    epsilon: float = 1.0e-6,
+) -> tf.Tensor:
+    """L = mean_k ( sum_{i in k} xi_i l_i / (sum_{i in k} xi_i + eps) ), flat over objects."""
+    num = scatter_sum(xi * per_hit, object_index, n_objects)
+    den = scatter_sum(xi, object_index, n_objects) + epsilon
+    per_object = num / den
+    return tf.reduce_sum(per_object) / tf.maximum(tf.cast(n_objects, tf.float32), 1.0)
 
 
 def _spec_value(spec, name: str, default=None):

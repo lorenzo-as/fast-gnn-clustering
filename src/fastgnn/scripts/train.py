@@ -99,9 +99,9 @@ def _set_seeds(seed: int) -> None:
 def _load_datasets(cfg: DictConfig):
     from fastgnn.data import CaloDataset
 
-    if cfg.data.name != "cmssw_processed":
+    if not str(cfg.data.name).startswith("cmssw_processed"):
         raise NotImplementedError(
-            f"Only data.name='cmssw_processed' is supported, got {cfg.data.name!r}"
+            f"Only cmssw_processed* datasets are supported, got {cfg.data.name!r}"
         )
 
     dataset_dir = resolve_project_path(cfg.data.dataset_dir)
@@ -201,6 +201,34 @@ def _validate_payload_quantity_fields(
     dataset: CaloDataset,
     payload_quantities: list,
 ) -> None:
+    from fastgnn.data.base import _payload_is_correction
+    from fastgnn.data.object_properties import PROPERTY_NAMES
+
+    if _payload_is_correction(payload_quantities):
+        # Correction mode: seeds are per-hit features; targets are computed object aggregates.
+        hit_fields = set(dataset.fields.get("hits", []))
+        bad_seeds = sorted(
+            {str(q["seed"]) for q in payload_quantities if str(q["seed"]) not in hit_fields}
+        )
+        bad_targets = sorted(
+            {
+                str(q["target"])
+                for q in payload_quantities
+                if str(q["target"]) not in set(PROPERTY_NAMES)
+            }
+        )
+        if bad_seeds:
+            raise ValueError(
+                f"{split} dataset is missing payload seed hit field(s): {', '.join(bad_seeds)}. "
+                f"Available hit fields: {', '.join(sorted(hit_fields)) or '<none>'}"
+            )
+        if bad_targets:
+            raise ValueError(
+                f"{split} payload target(s) are not computable object properties: "
+                f"{', '.join(bad_targets)}. Available: {', '.join(PROPERTY_NAMES)}"
+            )
+        return
+
     available = set(dataset.fields.get("truth.objects", []))
     missing = sorted(
         {

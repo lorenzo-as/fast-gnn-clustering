@@ -1,0 +1,9 @@
+# Direct payload regression (composed into training.payload). Mirrors the legacy
+# inline payload block; predicts transformed object properties per hit.
+mode: direct
+huber_delta: 1.0
+quantities:
+  - {name: log_sum_et, field: sum_et,              transform: log,      epsilon: 1.0e-6, weight: 1.0}
+  - {name: eta,        field: eta_energy_weighted, transform: identity,                  weight: 1.0}
+  - {name: phi,        field: phi_energy_weighted, transform: sin_cos,                   weight: 1.0}
+  - {name: z,          field: z_energy_weighted,   transform: scale,    scale: 100.0,    weight: 1.0}

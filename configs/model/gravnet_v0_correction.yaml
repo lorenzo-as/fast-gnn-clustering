@@ -1,0 +1,38 @@
+name: gravnet_v0_correction
+quantized: false
+max_vertices: 1024
+
+n_blocks: 2
+n_neighbours: 8
+n_dimensions: 4
+n_filters: 8
+n_propagate: 8
+n_postgn_dense_blocks: 2
+# beta(1) + cluster_space(3) + payload(4: r_et, r_eta, r_phi, r_z)
+output_dim: 8
+output_head: oc
+output_layout:
+  beta:
+    index: 0
+    activation: sigmoid
+  cluster_space:
+    start: 1
+    dim: 3
+  payload:
+    start: 4
+    dim: 4
+distance_metric: l1
+neighbour_selector: full
+
+dense_layer_dims:
+  input_dense: 8
+  post_gn: 16
+  postgn_block: 16
+  out0: 8
+  out1: 8
+
+gravnet_cfg:
+  fix_coordinate_space: false
+  other_kernel_initializer: glorot_uniform
+
+selector_cfg: {}

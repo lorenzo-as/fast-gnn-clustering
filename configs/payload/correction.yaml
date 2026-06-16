@@ -1,0 +1,14 @@
+# OC-style beta-weighted payload correction loss (composed into training.payload).
+# Each hit predicts a correction to its own seed feature; targets are the hit's
+# truth-cluster energy-weighted aggregates. a/sigmas come from the seed-correction
+# diagnostic (plotting/feature_target_normalization).
+mode: correction
+weighting: beta2        # later: oc_charge (xi = arctanh(beta)^2)
+beta_detach: false      # original-OC style: payload gradient flows into beta
+max_log_corr: 3.0       # a in E_T = E_seed * exp(a*tanh r); covers ~99% of clusters
+huber_delta: 1.0
+quantities:
+  - {name: et,  seed: et,  target: sum_et,              correction: mul_exp_tanh, a: 3.0, epsilon: 1.0e-6, weight: 1.0}
+  - {name: eta, seed: eta, target: eta_energy_weighted, correction: additive,          s: 1.0, sigma: 0.02, weight: 1.0}
+  - {name: phi, seed: phi, target: phi_energy_weighted, correction: additive_circular, s: 1.0, sigma: 0.02, weight: 1.0}
+  - {name: z,   seed: z,   target: z_energy_weighted,   correction: additive,          s: 1.0, sigma: 5.0,  weight: 1.0}
