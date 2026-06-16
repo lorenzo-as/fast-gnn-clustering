@@ -49,6 +49,8 @@ def test_build_hit_features_computes_formulas() -> None:
     np.testing.assert_allclose(hits["et"], hits["energy"] / np.cosh(hits["eta"]))
     np.testing.assert_allclose(hits["x_over_z"], [0.3, 0.0])
     np.testing.assert_allclose(hits["y_over_z"], [0.4, 0.1])
+    np.testing.assert_allclose(hits["sin_phi"], np.sin(hits["phi"]))
+    np.testing.assert_allclose(hits["cos_phi"], np.cos(hits["phi"]))
     np.testing.assert_allclose(hits["log_energy"], [np.log(5.0), np.log(1.0e-4)])
     np.testing.assert_allclose(hits["log_et"][1], np.log(1.0e-4))
 

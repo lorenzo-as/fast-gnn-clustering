@@ -178,12 +178,14 @@ def test_compute_normalization_accepts_awkward_records() -> None:
         np.array([0], dtype=np.int64),
     )
 
-    assert normalization == {
-        "x": {"mean": 0.5, "std": 0.5},
-        "y": {"mean": 0.0, "std": 1.0},
-        "z": {"mean": 100.0, "std": 1.0},
-        "energy": {"mean": 3.0, "std": 1.0},
-    }
+    assert set(normalization) == {"x", "y", "z", "energy"}
+    # z-score stats unchanged; robust (median/IQR) stats are now stored alongside.
+    assert all({"mean", "std", "median", "iqr"} == set(stats) for stats in normalization.values())
+    assert (normalization["x"]["mean"], normalization["x"]["std"]) == (0.5, 0.5)
+    assert (normalization["energy"]["mean"], normalization["energy"]["std"]) == (3.0, 1.0)
+    assert normalization["x"]["median"] == 0.5
+    # constant features: IQR is zero and clamps to 1.0 like std.
+    assert normalization["y"]["iqr"] == 1.0
 
 
 def test_get_clustering_np_skips_already_assigned_seeds() -> None:

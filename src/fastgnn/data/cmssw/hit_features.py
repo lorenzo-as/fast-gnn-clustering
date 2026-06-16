@@ -79,6 +79,14 @@ class HitFeatures:
         return np.divide(self.y, self.z, out=np.zeros_like(self.y), where=self.z != 0)
 
     @cached_property
+    def sin_phi(self) -> np.ndarray:
+        return np.sin(self.phi)
+
+    @cached_property
+    def cos_phi(self) -> np.ndarray:
+        return np.cos(self.phi)
+
+    @cached_property
     def log_energy(self) -> np.ndarray:
         return np.log(np.maximum(self.energy, self.log_floor))
 

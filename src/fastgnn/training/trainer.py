@@ -51,6 +51,7 @@ def train(
     train_cfg = cfg["training"]
     model_cfg = cfg["model"]
     feature_names = cfg["data"]["feature_names"]
+    normalization_method = cfg["data"].get("normalization", "zscore")
     output_layout = OCOutputLayout.from_config(model_cfg)
     payload_quantities = _payload_quantities(train_cfg)
 
@@ -91,6 +92,7 @@ def train(
             seed=cfg.get("seed", 42) + epoch,
             truncate=train_cfg.get("truncate", "first"),
             normalize_features=train_cfg.get("normalize_features", True),
+            normalization_method=normalization_method,
         ):
             if not warned_padding and not np.all(batch["mask"]):
                 warnings.warn(
@@ -130,6 +132,7 @@ def train(
             seed=0,
             truncate=train_cfg.get("truncate", "first"),
             normalize_features=train_cfg.get("normalize_features", True),
+            normalization_method=normalization_method,
         ):
             loss, components = _eval_step(
                 model,

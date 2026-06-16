@@ -292,6 +292,7 @@ class CaloDataset:
         seed: int = 0,
         truncate: Literal["first", "energy_desc", "random"] = "first",
         normalize_features: bool = True,
+        normalization_method: str | Mapping[str, Any] = "zscore",
     ) -> Iterator[dict[str, np.ndarray]]:
         """Yield padded mini-batches for training or evaluation loops."""
         feature_names = list(feature_names) if feature_names is not None else self.hit_features
@@ -303,6 +304,7 @@ class CaloDataset:
             truncate=truncate,
             seed=seed,
             normalization=self.normalization if normalize_features and self.normalization else None,
+            normalization_method=normalization_method,
         )
         return _batch_generator(
             dataset=self,
@@ -320,6 +322,7 @@ class CaloDataset:
         truncate: Literal["first", "energy_desc", "random"] = "first",
         normalize_features: bool = True,
         seed: int = 0,
+        normalization_method: str | Mapping[str, Any] = "zscore",
     ) -> dict[str, np.ndarray]:
         """Return this whole dataset padded for model.predict or notebook analysis."""
         if len(self) == 0:
@@ -333,6 +336,7 @@ class CaloDataset:
             truncate=truncate,
             seed=seed,
             normalization=self.normalization if normalize_features and self.normalization else None,
+            normalization_method=normalization_method,
         )
         return collator([self[i] for i in range(len(self))])
 
@@ -406,6 +410,7 @@ class PadCollator:
         truncate: Literal["first", "energy_desc", "random"] = "first",
         seed: int = 0,
         normalization: dict[str, Any] | None = None,
+        normalization_method: str | Mapping[str, Any] = "zscore",
     ):
         self.max_vertices = max_vertices
         self.feature_names = list(feature_names)
@@ -416,6 +421,7 @@ class PadCollator:
         self.seed = seed
         self._rng = np.random.default_rng(seed)
         self.normalization = normalization
+        self.normalization_method = normalization_method
 
     def _as_training_dict(self, event: EventRecord | dict) -> dict[str, np.ndarray]:
         if isinstance(event, EventRecord):
@@ -440,6 +446,7 @@ class PadCollator:
                         arr,
                         self.feature_names,
                         self.normalization,
+                        self.normalization_method,
                     )
 
                 n_hits = arr.shape[0]
@@ -467,17 +474,20 @@ class PadCollator:
             out[key] = np.stack(arrays)
 
         if self.payload_quantities:
-            arrays = []
-            for event, order in zip(training_events, orders, strict=True):
-                arr = event["payload_targets"][order]
-                n_hits = arr.shape[0]
-                if n_hits >= self.max_vertices:
-                    arrays.append(arr[: self.max_vertices])
-                    continue
-                pad_shape = (self.max_vertices - n_hits, *arr.shape[1:])
-                pad = np.full(pad_shape, self.pad_value, dtype=arr.dtype)
-                arrays.append(np.concatenate([arr, pad], axis=0))
-            out["payload_targets"] = np.stack(arrays)
+            # payload_targets is always present; payload_seeds only in correction mode.
+            payload_keys = [k for k in ("payload_targets", "payload_seeds") if k in training_events[0]]
+            for payload_key in payload_keys:
+                arrays = []
+                for event, order in zip(training_events, orders, strict=True):
+                    arr = event[payload_key][order]
+                    n_hits = arr.shape[0]
+                    if n_hits >= self.max_vertices:
+                        arrays.append(arr[: self.max_vertices])
+                        continue
+                    pad_shape = (self.max_vertices - n_hits, *arr.shape[1:])
+                    pad = np.full(pad_shape, self.pad_value, dtype=arr.dtype)
+                    arrays.append(np.concatenate([arr, pad], axis=0))
+                out[payload_key] = np.stack(arrays)
 
         out["mask"] = np.stack(masks)
         return out
@@ -609,6 +619,16 @@ def _transform_payload_target(
         raise ValueError(f"Unknown payload transform {transform!r}")
     return out.astype(np.float32)
 
+
+def robust_center_scale(values: np.ndarray, axis: int | None = None) -> tuple[Any, Any]:
+    """Return median and IQR/1.349 (== sigma for a Gaussian), clamped away from zero."""
+    median = np.median(values, axis=axis)
+    q1, q3 = np.percentile(values, [25, 75], axis=axis)
+    scale = (q3 - q1) / 1.349
+    scale = np.where(scale < 1e-8, 1.0, scale)
+    return median, scale
+
+
 def compute_normalization(
     records: list[dict[str, Any]],
     feature_names: list[str],
@@ -625,10 +645,15 @@ def compute_normalization(
         )
     flat = np.concatenate(features, axis=0)
     mean = flat.mean(axis=0)
-    std = flat.std(axis=0)
-    std = np.where(std < 1e-8, 1.0, std)
+    std = np.where(flat.std(axis=0) < 1e-8, 1.0, flat.std(axis=0))
+    median, iqr = robust_center_scale(flat, axis=0)
     return {
-        name: {"mean": float(mean[index]), "std": float(std[index])}
+        name: {
+            "mean": float(mean[index]),
+            "std": float(std[index]),
+            "median": float(median[index]),
+            "iqr": float(iqr[index]),
+        }
         for index, name in enumerate(feature_names)
     }
 
@@ -637,28 +662,56 @@ def apply_normalization(
     features: np.ndarray,
     feature_names: list[str],
     normalization: dict[str, Any],
+    method: str | Mapping[str, Any] = "zscore",
 ) -> np.ndarray:
-    """Validate feature names and apply z-score normalization."""
-    mean, std = _normalization_arrays(feature_names, normalization)
-    return ((features.astype(np.float32) - mean) / std).astype(np.float32)
+    """Validate feature names and apply per-feature z-score or robust normalization.
+
+    ``method`` is ``"zscore"`` (mean/std), ``"robust"`` (median/IQR), or a mapping
+    ``{"method": <default>, "overrides": {feature: method}}`` for per-feature control.
+    """
+    center, scale = _normalization_arrays(feature_names, normalization, method)
+    return ((features.astype(np.float32) - center) / scale).astype(np.float32)
+
+
+def _feature_method(method: str | Mapping[str, Any], name: str) -> str:
+    """Resolve the normalization method for a single feature."""
+    if isinstance(method, str):
+        resolved = method
+    else:  # mapping-like (dict or OmegaConf DictConfig)
+        overrides = method.get("overrides") or {}
+        resolved = overrides.get(name, method.get("method", "zscore"))
+    if resolved not in ("zscore", "robust"):
+        raise ValueError(f"Unknown normalization method {resolved!r} for feature {name!r}")
+    return resolved
+
+
+_METHOD_KEYS = {"zscore": ("mean", "std"), "robust": ("median", "iqr")}
 
 
 def _normalization_arrays(
     feature_names: list[str],
     normalization: dict[str, Any],
+    method: str | Mapping[str, Any] = "zscore",
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Returns mean and std arrays for the requested feature names in the requested order."""
+    """Return per-feature (center, scale) arrays for the requested method(s)."""
     missing = [name for name in feature_names if name not in normalization]
     if missing:
         raise ValueError(
             "Normalization is missing requested feature(s): "
             f"{', '.join(missing)}. Available: {', '.join(normalization)}"
         )
-    stats = [normalization[name] for name in feature_names]
-    return (
-        np.asarray([item["mean"] for item in stats], dtype=np.float32),
-        np.asarray([item["std"] for item in stats], dtype=np.float32),
-    )
+    centers, scales = [], []
+    for name in feature_names:
+        stats = normalization[name]
+        center_key, scale_key = _METHOD_KEYS[_feature_method(method, name)]
+        if center_key not in stats or scale_key not in stats:
+            raise ValueError(
+                f"Normalization for {name!r} lacks {center_key!r}/{scale_key!r}; "
+                "regenerate normalization.yaml to use robust scaling."
+            )
+        centers.append(stats[center_key])
+        scales.append(stats[scale_key])
+    return np.asarray(centers, dtype=np.float32), np.asarray(scales, dtype=np.float32)
 
 
 def _batch_generator(
