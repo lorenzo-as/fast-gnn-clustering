@@ -3,7 +3,7 @@
 # truth-cluster energy-weighted aggregates. a/sigmas come from the seed-correction
 # diagnostic (plotting/feature_target_normalization).
 mode: correction
-weighting: beta2        # later: oc_charge (xi = arctanh(beta)^2)
+weighting: oc_charge
 beta_detach: true       # detach beta from payload gradient; prevents payload from pulling beta down
 max_log_corr: 3.0       # a in E_T = E_seed * exp(a*tanh r); covers ~99% of clusters
 huber_delta: 1.0

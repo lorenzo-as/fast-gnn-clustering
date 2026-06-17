@@ -1,0 +1,36 @@
+name: gravnet_v0
+quantized: false
+max_vertices: 1024
+
+# Reference PyTorch hgcal-gravnet defaults (qgravnet model.py / factory.py defaults).
+# dense_layer_dims omitted: factory defaults apply (input_dense=64, post_gn=128,
+#   postgn_block=128, out0=64, out1=64).
+n_blocks: 4
+n_neighbours: 40
+n_dimensions: 4
+n_filters: 96
+n_propagate: 22
+n_postgn_dense_blocks: 4
+
+# beta(1) + cluster_space(4) + payload(4: r_et, r_eta, r_phi, r_z) = 9
+output_dim: 9
+output_head: oc
+output_layout:
+  beta:
+    index: 0
+    activation: sigmoid
+  cluster_space:
+    start: 1
+    dim: 4
+  payload:
+    start: 5
+    dim: 4
+
+distance_metric: l2_squared
+neighbour_selector: full
+
+gravnet_cfg:
+  fix_coordinate_space: false
+  other_kernel_initializer: glorot_uniform
+
+selector_cfg: {}
