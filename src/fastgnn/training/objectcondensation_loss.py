@@ -651,10 +651,18 @@ def _beta_weighted_object_mean(
     n_objects: tf.Tensor,
     epsilon: float = 1.0e-6,
 ) -> tf.Tensor:
-    """L = mean_k ( sum_{i in k} xi_i l_i / (sum_{i in k} xi_i + eps) ), flat over objects."""
+    """L = mean_k ( sum_{i in k} xi_i l_i / sum_{i in k} xi_i ), flat over objects.
+
+    The per-object aggregation is a *true* normalized weighted average, so it is
+    scale-invariant in xi: uniformly scaling all betas (hence all xi) down does not
+    reduce the loss. ``epsilon`` only guards against exact division-by-zero for an
+    object whose total charge is ~0; it is applied via ``maximum`` rather than as an
+    additive floor on the denominator, which would otherwise let the loss be driven to
+    zero by collapsing beta -> 0 (see calc_payload_correction_loss).
+    """
     num = scatter_sum(xi * per_hit, object_index, n_objects)
-    den = scatter_sum(xi, object_index, n_objects) + epsilon
-    per_object = num / den
+    den = scatter_sum(xi, object_index, n_objects)
+    per_object = num / tf.maximum(den, epsilon)
     return tf.reduce_sum(per_object) / tf.maximum(tf.cast(n_objects, tf.float32), 1.0)
 
 

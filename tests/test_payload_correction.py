@@ -7,7 +7,7 @@ import pytest
 import tensorflow as tf
 
 from fastgnn.data.base import _build_payload_correction_targets, _build_payload_seeds
-from fastgnn.evaluation.oc_metrics import decode_payload_corrections
+from fastgnn.evaluation import decode_payload_corrections
 from fastgnn.training.objectcondensation_loss import calc_payload_correction_loss
 
 SPECS = [
@@ -144,6 +144,33 @@ def test_beta_weighting_downweights_low_beta_hits() -> None:
     low = loss_with([[0.0], [1.0]], [0.99, 0.01])  # residual on low-beta hit
     high = loss_with([[1.0], [0.0]], [0.99, 0.01])  # residual on high-beta hit
     assert high > 10 * low  # high-beta hit dominates the object loss
+
+
+def test_loss_is_scale_invariant_in_beta() -> None:
+    # The per-object aggregation is a normalized weighted average, so uniformly
+    # scaling every beta (hence every xi) must NOT change the loss. This guards the
+    # collapse exploit where driving beta -> 0 zeroed L_payload via an eps-floored
+    # denominator (run 2026-06-16/23-22-55).
+    seeds = np.array([[2.0, 2.3, 0.1, 340.0], [5.0, 2.5, -0.2, 350.0]], np.float32)
+    targets = np.array([[10.0, 2.1, 0.0, 345.0], [10.0, 2.1, 0.0, 345.0]], np.float32)
+    predictions = np.array([[0.5, 0.2, 0.1, 1.0], [0.3, -0.1, 0.0, -2.0]], np.float32)
+    beta = np.array([0.9, 0.6], np.float32)
+    common = {"cluster_index": [1, 1], "batch": [0, 0]}
+
+    base = float(_loss(predictions, seeds, targets, beta, common["cluster_index"], common["batch"]))
+    assert base > 0.0  # nonzero residuals -> a real loss to be invariant about
+    for scale in (0.5, 0.1, 0.01):
+        scaled = float(
+            _loss(
+                predictions,
+                seeds,
+                targets,
+                beta * scale,
+                common["cluster_index"],
+                common["batch"],
+            )
+        )
+        assert np.isclose(scaled, base, rtol=1e-4), f"loss changed under beta*{scale}"
 
 
 def test_beta_detach_controls_gradient_into_beta() -> None:
