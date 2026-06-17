@@ -1,17 +1,25 @@
 name: cmssw_processed
-dataset_dir: data/processed/cmssw/v1/NANO_10_000samples-new_pt50-100_merging-0.5cm-0.8_tau/CartesianRecHits-ClusterEnergyThreshold_0GeV
+dataset_dir: data/processed/cmssw/v1/NANO_10_000samples-new_pt50-100_merging-0.5cm-0.8_tau/CartesianRecHits-ClusterEnergyThreshold_1GeV-HitMinEnergy_0.2GeV
+# Drop raw energy/et (heavy-tailed under z-score; log_energy/log_et are clean) and
+# replace raw phi (circular, discontinuous at +-pi) with sin_phi/cos_phi.
 feature_names:
   - x
   - y
   - z
   - r
   - eta
-  - phi
-  - energy
-  - et
+  - sin_phi
+  - cos_phi
   - layer
   - x_over_z
   - y_over_z
   - log_energy
   - log_et
 max_events: null
+# Per-feature normalization. z/r are mildly right-skewed; robust (median/IQR)
+# scaling tames their tails while the rest stay on the default z-score.
+normalization:
+  method: zscore
+  overrides:
+    z: robust
+    r: robust

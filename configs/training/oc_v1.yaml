@@ -7,21 +7,23 @@ truncate: energy_desc
 normalize_features: true
 
 qmin: 0.01
-qmin_reference: 1.0
+qmin_reference: 0.01
 qmin_schedule:
   type: piecewise
   interpolation: constant
   points:
     - [0, 0.1]
-    - [5, 0.01]
-    - [10, 1e-4]
+    - [1, 1e-2]
+    - [10, 1e-3]
+    - [20, 1e-4]
+    - [30, 1e-5]
 beta_stabilizing: soft_q_scaling
 beta_term_option: paper
 
 # payload is composed from the payload config group (payload@training.payload).
 loss_weights:
-  L_V_attractive: 1.0
-  L_V_repulsive: 1.0
+  L_V_attractive: 25.0
+  L_V_repulsive: 5.0
   L_beta_sig: 1.0
   L_beta_noise: 0.1
   L_payload: 1.0

@@ -1,7 +1,8 @@
 defaults:
   - data: cmssw_processed
   - model: gravnet_v0
-  - training: oc_minimal
+  - training: oc_v1
+  - payload@training.payload: correction
   - _self_
 
 seed: 0

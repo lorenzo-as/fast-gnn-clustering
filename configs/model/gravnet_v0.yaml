@@ -1,14 +1,15 @@
 name: gravnet_v0
 quantized: false
-max_vertices: 1024
+max_vertices: 256
 
 n_blocks: 2
-n_neighbours: 8
+n_neighbours: 16
 n_dimensions: 4
-n_filters: 8
-n_propagate: 8
-n_postgn_dense_blocks: 2
-output_dim: 9
+n_filters: 32
+n_propagate: 32
+n_postgn_dense_blocks: 3
+# beta(1) + cluster_space(5) + payload(4: r_et, r_eta, r_phi, r_z)
+output_dim: 10
 output_head: oc
 output_layout:
   beta:
@@ -16,19 +17,19 @@ output_layout:
     activation: sigmoid
   cluster_space:
     start: 1
-    dim: 3
-  payload:
-    start: 4
     dim: 5
+  payload:
+    start: 6
+    dim: 4
 distance_metric: l1
 neighbour_selector: full
 
 dense_layer_dims:
-  input_dense: 8
-  post_gn: 16
-  postgn_block: 16
-  out0: 8
-  out1: 8
+  input_dense: 32
+  post_gn: 32
+  postgn_block: 64
+  out0: 32
+  out1: 16
 
 gravnet_cfg:
   fix_coordinate_space: false
