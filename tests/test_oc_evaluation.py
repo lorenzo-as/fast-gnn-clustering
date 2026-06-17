@@ -2,14 +2,14 @@ import numpy as np
 import polars as pl
 import pytest
 
-from fastgnn.evaluation.oc_metrics import (
-    _matched_positions,
+from fastgnn.evaluation import (
     binned_efficiency,
     binned_fake_rate,
     decode_payload_predictions,
     evaluate_oc_padded,
     grid_search_thresholds,
 )
+from fastgnn.evaluation.matching import matched_positions as _matched_positions
 from fastgnn.training.oc_outputs import OCOutputLayout, split_oc_outputs
 
 
