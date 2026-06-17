@@ -187,7 +187,8 @@ def train(
         # ------------------------------------------------------------------
         # Checkpointing
         # ------------------------------------------------------------------
-        if mean_val_reference_loss < best_val_loss:
+        min_ckpt_epoch = train_cfg.get("best_model_start_epoch", 0)
+        if epoch >= min_ckpt_epoch and mean_val_reference_loss < best_val_loss:
             best_val_loss = mean_val_reference_loss
             model.save(str(output_dir / "best_model.keras"))
             logger.info("  saved best model (val_reference_loss=%.4f)", best_val_loss)
