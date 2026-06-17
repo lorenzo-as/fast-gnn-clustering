@@ -6,17 +6,21 @@ global_clipnorm: 1.0
 truncate: energy_desc
 normalize_features: true
 
-qmin: 0.01
-qmin_reference: 0.01
+qmin: 1.0e-5
+qmin_reference: 1.0e-5
+# High qmin early bootstraps the coordinate space and keeps L_V a strong counter-force;
+# a very low end (charge ~ atanh(beta)^2) gives sharp cluster separation. Held high through
+# the payload warm-in window below, then log-step-decayed to 1e-5 and held for the final ~45 epochs.
 qmin_schedule:
   type: piecewise
   interpolation: constant
   points:
     - [0, 0.1]
-    - [1, 1e-2]
-    - [10, 1e-3]
-    - [20, 1e-4]
-    - [30, 1e-5]
+    - [8, 3e-2]
+    - [15, 1e-2]
+    - [25, 1e-3]
+    - [40, 1e-4]
+    - [55, 1e-5]
 beta_stabilizing: soft_q_scaling
 beta_term_option: paper
 
@@ -26,7 +30,15 @@ loss_weights:
   L_V_repulsive: 5.0
   L_beta_sig: 1.0
   L_beta_noise: 0.1
-  L_payload: 1.0
+  # Warm-up: hold payload at 0 while clustering + beta form (the old sub-epoch-4 collapse
+  # window), then ramp to 1.0 over epochs 5-20 once the beta^2 weighting is meaningful.
+  L_payload:
+    type: piecewise
+    interpolation: linear
+    points:
+      - [0, 0.0]
+      - [5, 0.0]
+      - [20, 1.0]
 
 save_every: 20
 log_components_every: 1
