@@ -2,7 +2,7 @@
 
 input_files:
   - data/raw/cmssw/v1/NANO_10_000samples-new_pt50-100_merging-0.5cm-0.8_tau-0.root
-output_dir: data/processed/cmssw/v1/NANO_10_000samples-new_pt50-100_merging-0.5cm-0.8_tau/CartesianRecHits-ClusterEnergyThreshold_0GeV
+output_dir: data/processed/cmssw/v1/NANO_10_000samples-new_pt50-100_merging-0.5cm-0.8_tau/ThresholdRecHits-ClusterTransverseEnergyThreshold_1GeV-HitMinEnergy_0.2GeV
 max_events: null
 overwrite: false
 
@@ -10,12 +10,12 @@ zside: 1
 hit_features: [x, y, z, r, eta, phi, energy, et, layer, x_over_z, y_over_z, log_energy, log_et, cos_phi, sin_phi]
 log_floor: 1.0e-8
 preprocessing: rechits_energy_threshold
-hit_min_energy: null
+hit_min_energy: 0.2
 # Controls rechit links for always-stored raw and supported processed truth object properties.
 object_aggregation_mode: hard_assigned_full
-truth_min_object_energy: 0
+truth_min_object_energy: 1.0
 truth_min_sum_energy: 0
-truth_object_energy_field: impact_energy
+truth_object_energy_field: impact_pt
 filter_truth_by_zside: true
 step_size: null
 

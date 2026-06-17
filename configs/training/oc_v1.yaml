@@ -28,17 +28,23 @@ beta_term_option: paper
 loss_weights:
   L_V_attractive: 25.0
   L_V_repulsive: 5.0
-  L_beta_sig: 1.0
+  L_beta_sig:
+    type: piecewise
+    interpolation: linear
+    points:
+      - [0, 1.0]
+      - [20, 1.0]
+      - [40, 3.0]    # ramp up once payload is active; ratio beta:payload stays ~10:1
   L_beta_noise: 0.1
-  # Warm-up: hold payload at 0 while clustering + beta form (the old sub-epoch-4 collapse
-  # window), then ramp to 1.0 over epochs 5-20 once the beta^2 weighting is meaningful.
+  # Warm-up: hold payload at 0 until beta plateaus (~ep 10-15), then ramp to 0.3 cap.
+  # Cap at 0.3 (not 1.0) to keep beta loss dominant even with beta_detach off as fallback.
   L_payload:
     type: piecewise
     interpolation: linear
     points:
       - [0, 0.0]
-      - [5, 0.0]
-      - [20, 1.0]
+      - [10, 0.0]
+      - [35, 0.3]
 
 save_every: 20
 log_components_every: 1

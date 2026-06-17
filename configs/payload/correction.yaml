@@ -4,7 +4,7 @@
 # diagnostic (plotting/feature_target_normalization).
 mode: correction
 weighting: beta2        # later: oc_charge (xi = arctanh(beta)^2)
-beta_detach: false      # original-OC style: payload gradient flows into beta
+beta_detach: true       # detach beta from payload gradient; prevents payload from pulling beta down
 max_log_corr: 3.0       # a in E_T = E_seed * exp(a*tanh r); covers ~99% of clusters
 huber_delta: 1.0
 quantities:
