@@ -15,7 +15,6 @@ app = marimo.App(width="medium")
 def _():
     import json
     import os
-    import itertools
     from datetime import datetime
     from pathlib import Path
     import pickle
@@ -76,7 +75,6 @@ def _():
         PRJ_ROOT,
         Path,
         datetime,
-        itertools,
         json,
         mo,
         mplhep,
@@ -134,7 +132,32 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(COLORS, PLOTTING_CONFIG, config, history, mo, mplhep, np, pl, plt):
+def _(history, mo):
+    _has_payload_breakdown = (
+        history is not None
+        and len(history.get("train_components", [])) > 0
+        and any(str(key).startswith("L_payload_") for key in history["train_components"][0])
+    )
+    show_payload_breakdown = mo.ui.checkbox(
+        label="Show payload loss breakdown by quantity", value=False
+    )
+    show_payload_breakdown if _has_payload_breakdown else mo.md("")
+    return (show_payload_breakdown,)
+
+
+@app.cell(hide_code=True)
+def _(
+    COLORS,
+    PLOTTING_CONFIG,
+    config,
+    history,
+    mo,
+    mplhep,
+    np,
+    pl,
+    plt,
+    show_payload_breakdown,
+):
     mo.stop(history is None, mo.md("No training history found for this run."))
     train_components_df = pl.DataFrame(history["train_components"])
     val_components_df = pl.DataFrame(history["val_components"])
@@ -171,12 +194,17 @@ def _(COLORS, PLOTTING_CONFIG, config, history, mo, mplhep, np, pl, plt):
         "L_beta_sig": r"$\mathcal{L}_\beta^{sig}$",
         "L_beta_noise": r"$\mathcal{L}_\beta^{noise}$",
     }
+    if "L_payload" in train_components_df.columns:
+        loss_labels["L_payload"] = r"$\mathcal{L}_{payload}$"
+    payload_component_cols = [
+        _col for _col in train_components_df.columns if _col.startswith("L_payload_")
+    ]
 
     for _i, (_df_type, _df) in enumerate(
         zip(["train", "val"], [train_components_df, val_components_df]), start=1
     ):
         plt.sca(_axs[_i])
-        _colors = {"V": "#228833", "beta": "#CCBB44"}
+        _colors = {"V": "#228833", "beta": "#CCBB44", "payload": "#AA3377"}
         linestyles = {
             "L_V_attractive": "dashed",
             "L_V_repulsive": "dotted",
@@ -190,6 +218,17 @@ def _(COLORS, PLOTTING_CONFIG, config, history, mo, mplhep, np, pl, plt):
                 color=_colors.get(_loss_key.split("_")[1], "black"),
                 linestyle=linestyles.get(_loss_key, "solid"),
             )
+        if show_payload_breakdown.value and payload_component_cols:
+            _payload_styles = ["dashed", "dotted", "dashdot", (0, (3, 1, 1, 1))]
+            for _j, _payload_col in enumerate(payload_component_cols):
+                _name = _payload_col.replace("L_payload_", "")
+                plt.plot(
+                    _df[_payload_col],
+                    label=r"$\mathcal{L}_{payload}^{\mathrm{" + _name + r"}}$",
+                    color=_colors["payload"],
+                    linestyle=_payload_styles[_j % len(_payload_styles)],
+                    alpha=0.85,
+                )
         mplhep.add_text("Training" if _df_type == "train" else "Validation", loc="upper right")
         plt.yscale("log")
         plt.ylim(5e-3, _max_loss * 2)
@@ -214,7 +253,37 @@ def _(mo):
 def _(best_model, config, np, test_ds):
     from fastgnn.training.oc_outputs import OCOutputLayout, split_oc_outputs
 
-    oc_layout = OCOutputLayout.from_config(config["model"])
+    def _oc_layout_from_model_config(model_cfg):
+        try:
+            return OCOutputLayout.from_config(model_cfg)
+        except ValueError as exc:
+            if "output_layout.regressions is no longer supported" not in str(exc):
+                raise
+
+        layout_cfg = dict(model_cfg.get("output_layout") or {})
+        regressions = list(layout_cfg.pop("regressions", []) or [])
+        cluster_cfg = dict(layout_cfg.get("cluster_space") or {})
+        cluster_start = int(cluster_cfg.get("start", 1))
+        cluster_dim = int(cluster_cfg["dim"])
+        payload_start = cluster_start + cluster_dim
+        payload_dim = int(model_cfg.get("payload_output_dim") or 0)
+
+        if regressions:
+            regression_starts = [int(reg["start"]) for reg in regressions]
+            regression_stops = [int(reg["start"]) + int(reg["dim"]) for reg in regressions]
+            payload_start = min(regression_starts)
+            payload_dim = max(regression_stops) - payload_start
+        elif payload_dim == 0:
+            payload_dim = int(model_cfg["output_dim"]) - 1 - cluster_dim
+
+        if payload_dim > 0:
+            layout_cfg["payload"] = {"start": payload_start, "dim": payload_dim}
+
+        compat_model_cfg = dict(model_cfg)
+        compat_model_cfg["output_layout"] = layout_cfg
+        return OCOutputLayout.from_config(compat_model_cfg)
+
+    oc_layout = _oc_layout_from_model_config(config["model"])
     test_data = test_ds.as_padded(
         max_vertices=config["model"]["max_vertices"],
         feature_names=config["data"]["feature_names"],
@@ -233,22 +302,88 @@ def _(best_model, config, np, test_ds):
         test_beta,
         test_cluster_coords,
         test_data,
+        test_output_slices,
         test_preds,
     )
 
 
 @app.cell(hide_code=True)
-def _(config, np, test_data, test_ds):
+def _(config, mo, oc_layout):
+    payload_quantities = list(
+        ((config.get("training") or {}).get("payload") or {}).get("quantities") or []
+    )
+    has_payload_model = oc_layout.payload_dim > 0 and len(payload_quantities) > 0
+    if has_payload_model:
+        _payload_lines = [
+            f"- `{quantity.get('name', quantity.get('field'))}`: "
+            f"field `{quantity.get('field')}`, "
+            f"transform `{quantity.get('transform', 'identity')}`"
+            for quantity in payload_quantities
+        ]
+        _message = (
+            f"Model payload output dim: `{oc_layout.payload_dim}`. "
+            "Configured payloads:\n" + "\n".join(_payload_lines)
+        )
+    elif oc_layout.payload_dim > 0:
+        _message = (
+            f"Model payload output dim: `{oc_layout.payload_dim}`, "
+            "but `training.payload.quantities` is not configured."
+        )
+    else:
+        _message = "Model has no configured payload output."
+    mo.md(_message)
+    return has_payload_model, payload_quantities
+
+
+@app.cell(hide_code=True)
+def _(has_payload_model, mo):
+    _source_options = ["aggr.", "payl."] if has_payload_model else ["aggr."]
+    regression_primary_selector = mo.ui.dropdown(
+        options=_source_options,
+        label="Primary regression source",
+        value="aggr.",
+    )
+    regression_secondary_selector = mo.ui.dropdown(
+        options=["None", *_source_options],
+        label="Secondary regression source",
+        value="payl." if has_payload_model else "None",
+    )
+    mo.hstack([regression_primary_selector, regression_secondary_selector])
+    return regression_primary_selector, regression_secondary_selector
+
+
+@app.cell(hide_code=True)
+def _(regression_primary_selector, regression_secondary_selector):
+    primary_regression_source_key = regression_primary_selector.value
+    selected_regression_source_keys = [primary_regression_source_key]
+    if (
+        regression_secondary_selector.value != "None"
+        and regression_secondary_selector.value != primary_regression_source_key
+    ):
+        selected_regression_source_keys.append(regression_secondary_selector.value)
+    return primary_regression_source_key, selected_regression_source_keys
+
+
+@app.cell(hide_code=True)
+def _(config, np, payload_quantities, test_data, test_ds):
+    # Payload *corrections* are decoded from each hit's own raw (unnormalized) seed
+    # feature (e.g. ``et``, ``eta``, ``phi``), so the eval payload must carry those
+    # columns in addition to the physical x/y/z/energy used for matching and reco.
+    eval_feature_names = ["x", "y", "z", "energy"]
+    for _quantity in payload_quantities:
+        _seed = _quantity.get("seed")
+        if _seed is not None and str(_seed) not in eval_feature_names:
+            eval_feature_names.append(str(_seed))
     test_eval_data = test_ds.as_padded(
         max_vertices=config["model"]["max_vertices"],
-        feature_names=["x", "y", "z", "energy"],
+        feature_names=eval_feature_names,
         truncate=config["training"].get("truncate", "first"),
         normalize_features=False,
         seed=config.get("seed", 0),
     )
     np.testing.assert_array_equal(test_eval_data["mask"], test_data["mask"])
     np.testing.assert_array_equal(test_eval_data["hit_object_id"], test_data["hit_object_id"])
-    return (test_eval_data,)
+    return eval_feature_names, test_eval_data
 
 
 @app.cell(hide_code=True)
@@ -445,6 +580,7 @@ def _():
         evaluate_oc_padded,
         grid_search_thresholds,
     )
+    from fastgnn.evaluation.schema import match_response_columns
     from fastgnn.training.objectcondensation_loss import get_clustering_np
 
     return (
@@ -456,15 +592,16 @@ def _():
         evaluate_oc_padded,
         get_clustering_np,
         grid_search_thresholds,
+        match_response_columns,
     )
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _(has_payload_model, mo):
     threshold_objective_selector = mo.ui.dropdown(
         options=["matched_f1", "count_median", "count_mean"],
         label="Threshold Objective",
-        value="matched_f1",
+        value="count_mean",
     )
     matching_algorithm_selector = mo.ui.dropdown(
         options=["hungarian", "greedy"],
@@ -473,6 +610,9 @@ def _(mo):
     )
     matching_distance_threshold_selector = mo.ui.number(
         label="Distance Threshold in cm", value=50, step=0.5
+    )
+    payload_matching_distance_threshold_selector = mo.ui.number(
+        label="Payload matching distance threshold", value=0.3, step=0.05
     )
     matching_energy_ratio_min_selector = mo.ui.number(
         label="Minimum Energy Ratio", value=0.01, step=0.01
@@ -487,21 +627,26 @@ def _(mo):
         label="Start threshold calibration",
         kind="success",
     )
+    _matching_controls = [
+        matching_algorithm_selector,
+        matching_distance_threshold_selector,
+    ]
+    if has_payload_model:
+        _matching_controls.append(payload_matching_distance_threshold_selector)
+    _matching_controls.extend(
+        [
+            matching_energy_ratio_min_selector,
+            matching_energy_ratio_max_selector,
+            hungarian_energy_ratio_log_weight_selector,
+        ]
+    )
     mo.vstack(
         [
             mo.md(
                 "**Select the threshold objective and matching parameters used for calibration.**"
             ),
             threshold_objective_selector,
-            mo.hstack(
-                [
-                    matching_algorithm_selector,
-                    matching_distance_threshold_selector,
-                    matching_energy_ratio_min_selector,
-                    matching_energy_ratio_max_selector,
-                    hungarian_energy_ratio_log_weight_selector,
-                ]
-            ),
+            mo.hstack(_matching_controls),
             start_calibration_button,
         ]
     )
@@ -511,6 +656,7 @@ def _(mo):
         matching_distance_threshold_selector,
         matching_energy_ratio_max_selector,
         matching_energy_ratio_min_selector,
+        payload_matching_distance_threshold_selector,
         start_calibration_button,
         threshold_objective_selector,
     )
@@ -694,40 +840,108 @@ def _(
 @app.cell(hide_code=True)
 def _(
     best_oc_thresholds,
+    eval_feature_names,
     evaluate_oc_padded,
+    has_payload_model,
     hungarian_energy_ratio_log_weight_selector,
+    match_response_columns,
     matching_algorithm_selector,
     matching_distance_threshold_selector,
     matching_energy_ratio_max_selector,
     matching_energy_ratio_min_selector,
+    mo,
     oc_layout,
+    payload_matching_distance_threshold_selector,
+    payload_quantities,
+    pl,
+    primary_regression_source_key,
+    selected_regression_source_keys,
     test_data,
     test_ds,
     test_eval_data,
     test_preds,
 ):
     _tbeta, _td = best_oc_thresholds["tbeta"], best_oc_thresholds["td"]
-    oc_eval = evaluate_oc_padded(
-        preds=test_preds,
-        hit_object_id=test_data["hit_object_id"],
-        mask=test_data["mask"],
-        features=test_eval_data["features"],
-        feature_names=["x", "y", "z", "energy"],
-        tbeta=_tbeta,
-        td=_td,
-        layout=oc_layout,
-        events=[test_ds[i] for i in range(len(test_ds))],
-        max_match_distance=matching_distance_threshold_selector.value,
-        min_energy_ratio=matching_energy_ratio_min_selector.value,
-        max_energy_ratio=matching_energy_ratio_max_selector.value,
-        matching_algorithm=matching_algorithm_selector.value,
-        hungarian_energy_ratio_log_weight=hungarian_energy_ratio_log_weight_selector.value,
+    _events = [test_ds[i] for i in range(len(test_ds))]
+
+    def _evaluate_with_reference(reference, max_match_distance):
+        return evaluate_oc_padded(
+            preds=test_preds,
+            hit_object_id=test_data["hit_object_id"],
+            mask=test_data["mask"],
+            features=test_eval_data["features"],
+            feature_names=eval_feature_names,
+            tbeta=_tbeta,
+            td=_td,
+            layout=oc_layout,
+            payload_quantities=payload_quantities,
+            events=_events,
+            max_match_distance=max_match_distance,
+            min_energy_ratio=matching_energy_ratio_min_selector.value,
+            max_energy_ratio=matching_energy_ratio_max_selector.value,
+            matching_algorithm=matching_algorithm_selector.value,
+            hungarian_energy_ratio_log_weight=hungarian_energy_ratio_log_weight_selector.value,
+            matching_reference=reference,
+        )
+
+    oc_evals_by_matching = {
+        "aggr.": _evaluate_with_reference(
+            "aggregated",
+            matching_distance_threshold_selector.value,
+        )
+    }
+    if has_payload_model:
+        oc_evals_by_matching["payl."] = _evaluate_with_reference(
+            "payload",
+            payload_matching_distance_threshold_selector.value,
+        )
+
+    oc_eval = oc_evals_by_matching[primary_regression_source_key]
+    regression_sources = []
+    for _source_key in selected_regression_source_keys:
+        if _source_key not in oc_evals_by_matching:
+            continue
+        _source_eval = oc_evals_by_matching[_source_key]
+        _is_payload = _source_key == "payl."
+        if _is_payload and "payload_et_pred" not in _source_eval.predicted.columns:
+            continue
+        regression_sources.append(
+            {
+                "key": _source_key,
+                "label": _source_key,
+                "eval": _source_eval,
+                "matches": _source_eval.matches,
+                "predicted": _source_eval.predicted,
+                **match_response_columns(payload=_is_payload),
+            }
+        )
+    _source_colors = (
+        ["black"]
+        if len(regression_sources) == 1
+        else ["black", "#4477AA"] + ["#66CCEE"] * max(0, len(regression_sources) - 2)
     )
+    for _source, _color in zip(regression_sources, _source_colors):
+        _source["color"] = _color
     count_summary = oc_eval.count_summary()
     seed_summary = oc_eval.seed_summary()
     matching_summary = oc_eval.matching_summary()
+    _comparison_rows = []
+    for _reference, _eval in oc_evals_by_matching.items():
+        _summary = {
+            "matching_reference": _reference,
+            **_eval.count_summary(),
+            **_eval.seed_summary(),
+            **_eval.matching_summary(),
+        }
+        _comparison_rows.append(_summary)
     print(count_summary, "\n\n", seed_summary, "\n\n", matching_summary)
-    return (oc_eval,)
+    mo.vstack(
+        [
+            mo.md(f"Primary source for single-source views: `{primary_regression_source_key}`."),
+            mo.ui.table(pl.DataFrame(_comparison_rows)),
+        ]
+    )
+    return oc_eval, regression_sources
 
 
 @app.cell(hide_code=True)
@@ -794,40 +1008,38 @@ def _(
     binned_efficiency,
     binned_fake_rate,
     log_edges,
+    mo,
     np,
-    oc_eval,
     plot_binned_efficiency,
     plot_binned_fake_rate,
     plt,
-    test_ds,
+    regression_sources,
 ):
-    _truth_energy = oc_eval.truth["truth_energy"]
-    _bins_truth = log_edges(_truth_energy)
+    mo.stop(len(regression_sources) == 0, mo.md("Select at least one regression source."))
 
-    _truth_energy_table = binned_efficiency(
-        oc_eval.truth,
-        "truth_energy",
-        _bins_truth,
-    )
-
-    threshold = test_ds.metadata["preprocessing"]["truth_min_object_energy"]
-
-    _pred_energy = oc_eval.predicted["energy_pred"]
-    _bins_pred = np.concatenate(
+    _truth_et_values = np.concatenate(
         [
-            log_edges(
-                _pred_energy.filter(_pred_energy < threshold),
-                bins=3,
-            ),
-            _bins_truth[1:],
+            _source["eval"].truth["truth_et"].drop_nulls().to_numpy()
+            for _source in regression_sources
         ]
     )
-
-    _pred_energy_table = binned_fake_rate(
-        oc_eval.predicted,
-        "energy_pred",
-        _bins_pred,
+    _truth_et_values = _truth_et_values[np.isfinite(_truth_et_values) & (_truth_et_values > 0)]
+    _pred_et_values = np.concatenate(
+        [
+            _source["predicted"][_source["pred_et_col"]].drop_nulls().to_numpy()
+            for _source in regression_sources
+        ]
     )
+    _pred_et_values = _pred_et_values[np.isfinite(_pred_et_values) & (_pred_et_values > 0)]
+
+    mo.stop(
+        _truth_et_values.size == 0 or _pred_et_values.size == 0,
+        mo.md(
+            "No truth/predicted clusters at the selected thresholds (the model may have collapsed)."
+        ),
+    )
+    _bins_truth = log_edges(_truth_et_values)
+    _bins_pred = log_edges(_pred_et_values)
 
     _fig1, _axs = plt.subplots(
         nrows=1,
@@ -835,23 +1047,41 @@ def _(
         figsize=PLOTTING_CONFIG["figsize"]["A4"]["fullwidth_2pane"],
     )
 
-    plot_binned_efficiency(_axs[0], _truth_energy_table, color="black")
+    for _source in regression_sources:
+        _truth_et_table = binned_efficiency(
+            _source["eval"].truth,
+            "truth_et",
+            _bins_truth,
+        )
+        _pred_et_table = binned_fake_rate(
+            _source["predicted"],
+            _source["pred_et_col"],
+            _bins_pred,
+        )
+        plot_binned_efficiency(
+            _axs[0],
+            _truth_et_table,
+            label=_source["label"],
+            color=_source["color"],
+        )
+        plot_binned_fake_rate(
+            _axs[1],
+            _pred_et_table,
+            label=_source["label"],
+            color=_source["color"],
+        )
+
     _axs[0].set_xscale("log")
-    _axs[0].set_xlabel("Cluster truth energy [GeV]")
+    _axs[0].set_xlabel(r"Cluster truth $E_T$ [GeV]")
     _axs[0].set_ylabel("Efficiency")
-    _axs[0].axvline(threshold, color="grey", linestyle="--")
-    _axs[0].set_xlim(7e-1, 1e3)
     _axs[0].set_ylim(0.0, 1.0)
+    _axs[0].legend(loc="lower right")
 
-    plot_binned_fake_rate(_axs[1], _pred_energy_table, color="black")
     _axs[1].set_xscale("log")
-    _axs[1].set_xlabel("Cluster predicted energy [GeV]")
+    _axs[1].set_xlabel(r"Cluster predicted $E_T$ [GeV]")
     _axs[1].set_ylabel("Fake Rate")
-    _axs[1].axvline(threshold, color="grey", linestyle="--")
-    _axs[1].set_xlim(1.5e-1, 1e3)
     _axs[1].set_ylim(-0.02, 1.0)
-
-    assert (_pred_energy_table["fake_rate"] <= _axs[1].get_ylim()[1]).all()
+    _axs[1].legend(loc="upper left")
 
     _fig1.tight_layout()
     _fig1
@@ -872,41 +1102,60 @@ def _(
     binned_efficiency,
     binned_fake_rate,
     log_edges,
-    oc_eval,
+    mo,
+    np,
     plot_binned_efficiency,
     plot_binned_fake_rate,
     plt,
+    regression_sources,
 ):
+    mo.stop(len(regression_sources) == 0, mo.md("Select at least one regression source."))
     _fig1, _axs = plt.subplots(1, 3, figsize=PLOTTING_CONFIG["figsize"]["A4"]["fullwidth_3pane"])
 
-    for _ax, _col, _xlabel, _metric, _frame, _bin_values in zip(
-        _axs,
-        ["n_hits_truth", "n_hits_pred", "beta_seed"],
-        ["True cluster size", "Predicted cluster size", r"$\beta$ score of OC seed"],
-        ["efficiency", "fake_rate", "fake_rate"],
-        [oc_eval.truth, oc_eval.predicted, oc_eval.predicted],
-        [
-            oc_eval.truth["n_hits_truth"],
-            oc_eval.predicted["n_hits_pred"],
-            oc_eval.predicted["beta_seed"],
-        ],
-    ):
+    _panels = [
+        (_axs[0], "n_hits_truth", "True cluster size", "efficiency", "truth"),
+        (_axs[1], "n_hits_pred", "Predicted cluster size", "fake_rate", "predicted"),
+        (_axs[2], "beta_seed", r"$\beta$ score of OC seed", "fake_rate", "predicted"),
+    ]
+    for _ax, _col, _xlabel, _metric, _frame_name in _panels:
+        _bin_values = np.concatenate(
+            [
+                _source["eval"].truth[_col].drop_nulls().to_numpy()
+                if _frame_name == "truth"
+                else _source["predicted"][_col].drop_nulls().to_numpy()
+                for _source in regression_sources
+            ]
+        )
+        _bin_values = _bin_values[np.isfinite(_bin_values) & (_bin_values > 0)]
+        if _bin_values.size == 0:
+            _ax.text(0.5, 0.5, "No entries", transform=_ax.transAxes, ha="center", va="center")
+            _ax.set_xlabel(_xlabel)
+            continue
         _bins = log_edges(_bin_values)
-
-        if _metric == "efficiency":
-            _table = binned_efficiency(_frame, _col, _bins)
-        else:
-            _table = binned_fake_rate(_frame, _col, _bins)
-
-        if _metric == "efficiency":
-            plot_binned_efficiency(_ax, _table, color="black")
-        else:
-            plot_binned_fake_rate(_ax, _table, color="black")
+        for _source in regression_sources:
+            _frame = _source["eval"].truth if _frame_name == "truth" else _source["predicted"]
+            if _metric == "efficiency":
+                _table = binned_efficiency(_frame, _col, _bins)
+                plot_binned_efficiency(
+                    _ax,
+                    _table,
+                    label=_source["label"],
+                    color=_source["color"],
+                )
+            else:
+                _table = binned_fake_rate(_frame, _col, _bins)
+                plot_binned_fake_rate(
+                    _ax,
+                    _table,
+                    label=_source["label"],
+                    color=_source["color"],
+                )
         _ax.set_xscale("log")
         _ax.set_xlabel(_xlabel)
         _ax.set_ylabel("Efficiency" if _metric == "efficiency" else "Fake Rate")
         _ax.set_ylim(-0.02, 1.0)
         _ax.set_yticks([0.2, 0.4, 0.6, 0.8, 1.0])
+        _ax.legend(loc="lower right" if _metric == "efficiency" else "upper left")
         _ax.grid(alpha=0.25)
 
     plt.tight_layout()
@@ -923,90 +1172,21 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(itertools, np, pl):
-    REFERENCE_LINE_KWARGS = {"color": "green", "linestyle": "--"}
-
-    def energy_weighted_str(s: str) -> str:
-        """Wraps a Latex string (must start and end with $) to mark weighting by energy."""
-        assert s[0] == "$" and s[-1] == "$"
-        return r"$\langle " + s[1:-1] + r"\rangle_\mathrm{E}$"
-
-    def log_edges(values, bins=12):
-        values = np.asarray(values, dtype=float)
-        return np.logspace(
-            np.log10(values.min()),
-            np.log10(values.max()),
-            bins + 1,
-        )
-
-    def binned_profile(x, y, bins):
-        x = np.asarray(x, dtype=float)
-        y = np.asarray(y, dtype=float)
-        bins = np.asarray(bins, dtype=float)
-
-        assert x.shape == y.shape
-        assert np.all(np.isfinite(x)) and np.all(np.isfinite(y))
-        assert np.all(np.diff(bins) > 0)
-
-        idx = np.digitize(x, bins) - 1
-
-        rows = []
-        for i, (lo, hi) in enumerate(itertools.pairwise(bins)):
-            values = y[idx == i]
-            n = values.size
-
-            if n:
-                q16, q84 = np.quantile(values, [0.16, 0.84])
-                rows.append(
-                    {
-                        "bin_low": lo,
-                        "bin_high": hi,
-                        "n": int(n),
-                        "mean": values.mean(),
-                        "median": np.median(values),
-                        "sigma68": 0.5 * (q84 - q16),
-                    }
-                )
-            else:
-                rows.append(
-                    {
-                        "bin_low": lo,
-                        "bin_high": hi,
-                        "n": 0,
-                        "mean": None,
-                        "median": None,
-                        "sigma68": None,
-                    }
-                )
-
-        return pl.DataFrame(rows)
-
-    def plot_profile_points(ax, table, y_col, *, color="black", marker="o", label=None):
-        if table.is_empty():
-            return
-        table = table.filter(pl.col(y_col).is_not_null())
-        if table.is_empty():
-            return
-        bin_low = table["bin_low"].to_numpy()
-        bin_high = table["bin_high"].to_numpy()
-        x = np.where(
-            (bin_low > 0) & (bin_high > 0), np.sqrt(bin_low * bin_high), 0.5 * (bin_low + bin_high)
-        )
-        xerr = [x - bin_low, bin_high - x]
-        ax.errorbar(
-            x,
-            table[y_col].to_numpy(),
-            xerr=xerr,
-            fmt=marker,
-            color=color,
-            capsize=2,
-            label=label,
-        )
+def _():
+    # Binned-profile statistics live in fastgnn.evaluation.binned; the matplotlib
+    # profile/response helpers live in fastgnn.plotting.
+    from fastgnn.evaluation.binned import binned_profile, fwhm_and_mu, log_edges
+    from fastgnn.plotting import (
+        REFERENCE_LINE_KWARGS,
+        energy_weighted_str,
+        plot_profile_points,
+    )
 
     return (
         REFERENCE_LINE_KWARGS,
         binned_profile,
         energy_weighted_str,
+        fwhm_and_mu,
         log_edges,
         plot_profile_points,
     )
@@ -1025,8 +1205,16 @@ def _(mo):
     show_median_response = mo.ui.checkbox(
         label="Show median response in profile plots", value=False
     )
-    show_median_response
-    return (show_median_response,)
+    show_relative_residual = mo.ui.checkbox(
+        label="Show relative residual instead of ratio", value=False
+    )
+    mo.vstack(
+        [
+            show_median_response,
+            show_relative_residual,
+        ]
+    )
+    return show_median_response, show_relative_residual
 
 
 @app.cell(hide_code=True)
@@ -1038,42 +1226,63 @@ def _(
     log_edges,
     mo,
     np,
-    oc_eval,
     plot_profile_points,
     plt,
+    regression_sources,
     show_median_response,
+    show_relative_residual,
 ):
-    ## Response histograms for energy and transverse energy
-    _fig1, _axs = plt.subplots(
-        nrows=1, ncols=2, figsize=PLOTTING_CONFIG["figsize"]["A4"]["fullwidth_2pane"]
+    mo.stop(len(regression_sources) == 0, mo.md("Select at least one regression source."))
+
+    _value_col = "residual_col" if show_relative_residual.value else "response_col"
+    _ylabel = (
+        r"$(E_{T,\mathrm{pred}} - E_{T,\mathrm{true}}) / E_{T,\mathrm{true}}$"
+        if show_relative_residual.value
+        else r"$E_{T,\mathrm{pred}}/E_{T,\mathrm{true}}$"
     )
+    _reference_value = 0.0 if show_relative_residual.value else 1.0
 
-    _matches = oc_eval.matches
-    _energy_response = _matches["energy_response"]
-    _et_response = _matches["et_response"]
-
-    for _ax, _values, _title, _xlabel in [
-        (_axs[0], _energy_response, "Energy Response", r"$E_\mathrm{pred}/E_\mathrm{true}$"),
-        (
-            _axs[1],
-            _et_response,
-            r"Transverse Energy Response",
-            r"$E_{T,\mathrm{pred}}/E_{T,\mathrm{true}}$",
-        ),
-    ]:
-        _upper_lim = 15
-        _bins = np.linspace(0, _upper_lim, 50)
-        _ax.hist(_values, bins=_bins, color="black", histtype="step")
-        _ax.axvline(1.0, **REFERENCE_LINE_KWARGS)
-        _ax.set_xlim(None, _upper_lim)
-        _ax.set_xlabel(_xlabel)
-        _ax.set_xlim(0, _upper_lim)
-        _ax.set_ylim(1e-3, None)
-        _txt1 = "Overflow:\nMean:"
-        _txt2 = f"{(_values > _upper_lim).sum() / len(_values):.2%} \n{_values.mean():.2f}"
-        _ax.text(0.6, 0.95, _txt1, transform=_ax.transAxes, ha="left", va="top", fontsize="small")
-        _ax.text(0.82, 0.95, _txt2, transform=_ax.transAxes, ha="left", va="top", fontsize="small")
-    _axs[0].set_ylabel("Matched clusters")
+    ## Response histogram for transverse energy
+    _fig1, _ax = plt.subplots(
+        nrows=1, ncols=1, figsize=PLOTTING_CONFIG["figsize"]["A4"]["halfwidth"]
+    )
+    for _i, _source in enumerate(regression_sources):
+        _matches = _source["matches"]
+        _values = _matches[_source[_value_col]].drop_nulls().to_numpy()
+        _values = _values[np.isfinite(_values)]
+        if len(_values) == 0:
+            continue
+        if show_relative_residual.value:
+            _lim = max(0.5, float(np.quantile(np.abs(_values), 0.98)))
+            _bins = np.linspace(-_lim, _lim, 50)
+        else:
+            _upper_lim = 15
+            _bins = np.linspace(0, _upper_lim, 50)
+        _ax.hist(
+            _values,
+            bins=_bins,
+            color=_source["color"],
+            histtype="step",
+        )
+        _lower_lim = float(_bins[0])
+        _upper_lim = float(_bins[-1])
+        _overflow = ((_values < _lower_lim) | (_values > _upper_lim)).sum() / len(_values)
+        _txt = f"{_source['label']}\n$\\mu$={_values.mean():.2f}\noverflow: {_overflow:.1%}"
+        _ax.text(
+            0.05,
+            0.90 - 0.16 * _i,
+            _txt,
+            transform=_ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize="small",
+            color=_source["color"],
+        )
+    _ax.axvline(_reference_value, **REFERENCE_LINE_KWARGS)
+    _ax.set_xlabel(_ylabel)
+    _ax.set_ylabel("Matched clusters")
+    _ax.set_ylim(1e-3, None)
+    _ax.grid(alpha=0.25)
     plt.tight_layout()
 
     ## Response vs truth for transverse energy and eta
@@ -1082,87 +1291,160 @@ def _(
     )
     _aggs = ["mean", "median"] if show_median_response.value else ["mean"]
 
-    _truth_et, _et_response_vs_et = (
-        _matches.select(["truth_et", "et_response"]).drop_nulls().to_numpy().T
-    )
-    _truth_eta, _et_response_vs_eta = (
-        _matches.select(["truth_centroid_eta", "et_response"]).drop_nulls().to_numpy().T
-    )
-
-    _axs[0].scatter(_truth_et, _et_response_vs_et, alpha=0.25, s=10, color="grey")
-    for _agg in _aggs:
-        plot_profile_points(
-            _axs[0],
-            binned_profile(_truth_et, _et_response_vs_et, log_edges(_truth_et)),
-            _agg,
-            label=_agg.capitalize(),
-            color="black" if _agg == "mean" else "purple",
+    for _source in regression_sources:
+        _matches = _source["matches"]
+        _col = _source[_value_col]
+        _truth_et, _values_vs_et = _matches.select(["truth_et", _col]).drop_nulls().to_numpy().T
+        _truth_eta, _values_vs_eta = (
+            _matches.select(["truth_centroid_eta", _col]).drop_nulls().to_numpy().T
         )
+        if len(_truth_et) == 0:
+            continue
+        _axs[0].scatter(
+            _truth_et,
+            _values_vs_et,
+            alpha=0.18,
+            s=10,
+            color=_source["color"],
+        )
+        for _agg in _aggs:
+            plot_profile_points(
+                _axs[0],
+                binned_profile(_truth_et, _values_vs_et, log_edges(_truth_et)),
+                _agg,
+                label=_source["label"] if _agg == "mean" else None,
+                color=_source["color"] if _agg == "mean" else "purple",
+            )
+
+        _abs_eta = np.abs(_truth_eta)
+        _axs[1].scatter(
+            _abs_eta,
+            _values_vs_eta,
+            alpha=0.18,
+            s=10,
+            color=_source["color"],
+        )
+        _eta_bins = np.linspace(np.quantile(_abs_eta, 0.01), np.quantile(_abs_eta, 0.99), 12)
+        for _agg in _aggs:
+            plot_profile_points(
+                _axs[1],
+                binned_profile(_abs_eta, _values_vs_eta, _eta_bins),
+                _agg,
+                label=_source["label"] if _agg == "mean" else None,
+                color=_source["color"] if _agg == "mean" else "purple",
+            )
     _axs[0].set_xscale("log")
     _axs[0].set_xlabel(r"$E_{T,\mathrm{true}}$ [GeV]")
-    _axs[0].set_ylabel(r"$E_{T,\mathrm{pred}}/E_{T,\mathrm{true}}$")
-
-    _abs_eta = np.abs(_truth_eta)
-    _axs[1].scatter(_abs_eta, _et_response_vs_eta, alpha=0.25, s=10, color="grey")
-    _eta_bins = np.linspace(np.quantile(_abs_eta, 0.01), np.quantile(_abs_eta, 0.99), 12)
-    for _agg in _aggs:
-        plot_profile_points(
-            _axs[1],
-            binned_profile(_abs_eta, _et_response_vs_eta, _eta_bins),
-            _agg,
-            label=_agg.capitalize(),
-            color="black" if _agg == "mean" else "purple",
-        )
+    _axs[0].set_ylabel(_ylabel)
     _axs[1].set_xlabel(energy_weighted_str(r"$\eta_\mathrm{{true}}$"))
 
     for _ax in _axs:
         _ax.grid(alpha=0.25)
-        _ax.set_yscale("log")
-        _ax.axhline(1.0, **REFERENCE_LINE_KWARGS)
+        if not show_relative_residual.value:
+            _ax.set_yscale("log")
+        _ax.axhline(_reference_value, **REFERENCE_LINE_KWARGS)
         _ax.legend()
     plt.tight_layout()
 
-    ## Predicted vs true energy and transverse energy
-    _fig3, _axs = plt.subplots(
+    ## Predicted vs true transverse energy
+    _fig3, _ax = plt.subplots(
         nrows=1,
-        ncols=2,
-        figsize=PLOTTING_CONFIG["figsize"]["A4"]["fullwidth_2pane"],
+        ncols=1,
+        figsize=PLOTTING_CONFIG["figsize"]["A4"]["halfwidth"],
     )
 
-    for _ax, _en, _label in [
-        (_axs[0], "energy", "E_{"),
-        (_axs[1], "et", "E_{T,"),
-    ]:
+    for _source in regression_sources:
+        _matches = _source["matches"]
         _truth, _pred = (
-            oc_eval.matches.select(f"truth_{_en}", "sum_et_reco" if _en == "et" else "energy_pred")
-            .drop_nulls()
-            .to_numpy()
-            .T
+            _matches.select("truth_et", _source["pred_et_col"]).drop_nulls().to_numpy().T
         )
-        _truth_et_all = oc_eval.truth.select(f"truth_{_en}").drop_nulls().to_numpy()
-        _et_bins = log_edges(_truth_et_all)
-
-        _ax.scatter(_truth, _pred, alpha=0.25, s=10, color="grey")
+        if len(_truth) == 0:
+            continue
+        _ax.scatter(_truth, _pred, alpha=0.25, s=10, color=_source["color"])
         plot_profile_points(
             _ax,
             binned_profile(_truth, _pred, log_edges(_truth)),
             "mean",
+            color=_source["color"],
+            label=_source["label"],
         )
-        _low = min(float(_truth.min()), float(_pred.min()))
-        _high = max(float(_truth.max()), float(_pred.max()))
+    _truth_all = np.concatenate(
+        [_source["matches"]["truth_et"].drop_nulls().to_numpy() for _source in regression_sources]
+    )
+    _pred_cols = [
+        _source["matches"][_source["pred_et_col"]].drop_nulls().to_numpy()
+        for _source in regression_sources
+        if _source["pred_et_col"] in _source["matches"].columns
+    ]
+    _pred_all = np.concatenate(_pred_cols) if _pred_cols else _truth_all
+    if _truth_all.size and _pred_all.size:
+        _low = min(float(_truth_all.min()), float(_pred_all.min()))
+        _high = max(float(_truth_all.max()), float(_pred_all.max()))
         _ax.plot([_low, _high], [_low, _high], **REFERENCE_LINE_KWARGS)
-        _ax.set_xscale("log")
-        _ax.set_yscale("log")
-        _ax.set(
-            xlabel=rf"${_label}" + r"\mathrm{{true}}}$ [GeV]",
-            ylabel=rf"${_label}" + r"\mathrm{{pred}}}$ [GeV]",
-        )
-        _axs[0].grid(alpha=0.25)
+    _ax.set_xscale("log")
+    _ax.set_yscale("log")
+    _ax.set(
+        xlabel=r"$E_{T,\mathrm{true}}$ [GeV]",
+        ylabel=r"$E_{T,\mathrm{pred}}$ [GeV]",
+    )
+    _ax.grid(alpha=0.25)
+    _ax.legend()
 
     plt.tight_layout()
-    _fig3
-
     mo.vstack([_fig1, _fig2, _fig3])
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    has_payload_model,
+    mo,
+    np,
+    payload_quantities,
+    pl,
+    test_data,
+    test_output_slices,
+):
+    _rows = []
+    if has_payload_model and test_output_slices.payload is not None:
+        _cursor = 0
+        _valid = test_data["mask"].astype(bool)
+        for _quantity in payload_quantities:
+            _transform = str(_quantity.get("transform", "identity"))
+            _name = str(_quantity.get("name", _quantity.get("field")))
+            if _transform == "sin_cos":
+                _sin = test_output_slices.payload[..., _cursor][_valid]
+                _cos = test_output_slices.payload[..., _cursor + 1][_valid]
+                _norm = np.hypot(_sin, _cos)
+                _rows.append(
+                    {
+                        "payload": _name,
+                        "mean_norm": float(np.mean(_norm)),
+                        "median_norm": float(np.median(_norm)),
+                        "sigma68_norm": float(
+                            0.5 * (np.quantile(_norm, 0.84) - np.quantile(_norm, 0.16))
+                        ),
+                        "min_norm": float(np.min(_norm)),
+                        "max_norm": float(np.max(_norm)),
+                    }
+                )
+                _cursor += 2
+            else:
+                _cursor += 1
+    _out = (
+        mo.vstack(
+            [
+                mo.md("#### Payload sin/cos calibration cross-check"),
+                mo.ui.table(pl.DataFrame(_rows)),
+            ]
+        )
+        if _rows
+        else mo.md(
+            "#### Payload sin/cos calibration cross-check\n\n"
+            "No payload `sin_cos` quantities configured for this run."
+        )
+    )
+    _out
     return
 
 
@@ -1175,40 +1457,77 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(PLOTTING_CONFIG, energy_weighted_str, oc_eval, plt):
+def _(
+    PLOTTING_CONFIG,
+    energy_weighted_str,
+    fwhm_and_mu,
+    mo,
+    plt,
+    regression_sources,
+):
     _fig1, _axs = plt.subplots(
         nrows=1,
         ncols=3,
         figsize=PLOTTING_CONFIG["figsize"]["A4"]["fullwidth_3pane"],
     )
-    for _ax, _col, _label in [
+    mo.stop(len(regression_sources) == 0, mo.md("Select at least one regression source."))
+
+    for _ax, _axis, _label in [
         (
             _axs[0],
-            "eta_residual",
+            "eta",
             energy_weighted_str(r"$\eta_\mathrm{true}$")
             + " - "
             + energy_weighted_str(r"$\eta_\mathrm{pred}$"),
         ),
         (
             _axs[1],
-            "phi_residual",
+            "phi",
             energy_weighted_str(r"$\phi_\mathrm{true}$")
             + " - "
             + energy_weighted_str(r"$\phi_\mathrm{pred}$"),
         ),
         (
             _axs[2],
-            "z_residual",
+            "z",
             energy_weighted_str(r"$z_\mathrm{true}$")
             + " - "
             + energy_weighted_str(r"$z_\mathrm{pred}$")
             + " [cm]",
         ),
     ]:
-        _values = oc_eval.matches[_col].drop_nulls()
-        if len(_values):
-            _ax.hist(_values, bins=50, color="black", histtype="step")
+        _stats_lines = []
+        for _source in regression_sources:
+            _values = _source["matches"][_source["position_cols"][_axis]].drop_nulls().to_numpy()
+            if len(_values):
+                _ax.hist(
+                    _values,
+                    bins=50,
+                    color=_source["color"],
+                    histtype="step",
+                )
+                _fwhm, _mu = fwhm_and_mu(_values)
+                _stats_lines.append(
+                    (
+                        _source["color"],
+                        f"{_source['label']}\nFWHM={_fwhm:.3g}\n$\\mu$={_mu:.3g}"
+                        if _fwhm is not None and _mu is not None
+                        else f"{_source['label']}: no entries",
+                    )
+                )
+        if _stats_lines:
             _ax.axvline(0.0, color="grey", linestyle="--")
+            for _i, (_color, _text) in enumerate(_stats_lines):
+                _ax.text(
+                    0.97,
+                    0.92 - 0.16 * _i,
+                    _text,
+                    transform=_ax.transAxes,
+                    ha="right",
+                    va="top",
+                    fontsize="small",
+                    color=_color,
+                )
         else:
             _ax.text(0.5, 0.5, "No entries", transform=_ax.transAxes, ha="center", va="center")
         _ax.set_xlabel(_label)
@@ -1227,26 +1546,46 @@ def _(
     binned_profile,
     energy_weighted_str,
     log_edges,
-    oc_eval,
+    mo,
     plot_profile_points,
     plt,
+    regression_sources,
 ):
     _fig1, _axs = plt.subplots(
         nrows=1,
         ncols=3,
         figsize=PLOTTING_CONFIG["figsize"]["A4"]["fullwidth_3pane"],
     )
-    for _ax, _col, _ylabel in [
-        (_axs[0], "relative_eta_residual", energy_weighted_str(r"$\Delta_\mathrm{rel}\eta$")),
-        (_axs[1], "relative_phi_residual", energy_weighted_str(r"$\Delta_\mathrm{rel}\phi$")),
-        (_axs[2], "relative_z_residual", energy_weighted_str(r"$\Delta_\mathrm{rel}z$")),
+    mo.stop(len(regression_sources) == 0, mo.md("Select at least one regression source."))
+
+    for _ax, _axis, _ylabel in [
+        (_axs[0], "eta", energy_weighted_str(r"$\Delta_\mathrm{rel}\eta$")),
+        (_axs[1], "phi", energy_weighted_str(r"$\Delta_\mathrm{rel}\phi$")),
+        (_axs[2], "z", energy_weighted_str(r"$\Delta_\mathrm{rel}z$")),
     ]:
-        _truth_et, _values = oc_eval.matches.select("truth_et", _col).drop_nulls().to_numpy().T
-        if len(_truth_et):
-            _table = binned_profile(_truth_et, _values, log_edges(_truth_et))
-            plot_profile_points(_ax, _table, "mean")
+        _had_values = False
+        for _source in regression_sources:
+            _truth_et, _values = (
+                _source["matches"]
+                .select("truth_et", _source["relative_position_cols"][_axis])
+                .drop_nulls()
+                .to_numpy()
+                .T
+            )
+            if len(_truth_et):
+                _had_values = True
+                _table = binned_profile(_truth_et, _values, log_edges(_truth_et))
+                plot_profile_points(
+                    _ax,
+                    _table,
+                    "mean",
+                    color=_source["color"],
+                    label=_source["label"],
+                )
+        if _had_values:
             _ax.axhline(0.0, **REFERENCE_LINE_KWARGS)
             _ax.set_xscale("log")
+            _ax.legend()
         else:
             _ax.text(0.5, 0.5, "No entries", transform=_ax.transAxes, ha="center", va="center")
         _ax.set(
@@ -1336,9 +1675,36 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
+def _():
+    # Per-event accounting tables (energy balance, per-truth match summary, fake
+    # clusters) are computed by fastgnn.evaluation.event_summary; this cell only
+    # assembles the Plotly figure from them.
+    from fastgnn.evaluation.event_summary import (
+        event_energy_accounting,
+        event_fake_cluster_rows,
+        event_hit_observables,
+        event_seed_truth_matches,
+        event_truth_match_summary,
+    )
+
+    return (
+        event_energy_accounting,
+        event_fake_cluster_rows,
+        event_hit_observables,
+        event_seed_truth_matches,
+        event_truth_match_summary,
+    )
+
+
+@app.cell(hide_code=True)
 def _(
     count_clusters_from_labels,
     count_truth_objects,
+    event_energy_accounting,
+    event_fake_cluster_rows,
+    event_hit_observables,
+    event_seed_truth_matches,
+    event_truth_match_summary,
     get_clustering_np,
     np,
     oc_layout,
@@ -1455,6 +1821,7 @@ def _(
         eval_feature_names=None,
         oc_eval=None,
         event_idx=0,
+        prediction_source="aggr.",
     ):
         _outputs = split_oc_outputs(preds[event_idx : event_idx + 1], oc_layout)
         _hit_object_id = hit_object_id[event_idx]
@@ -1774,8 +2141,13 @@ def _(
             hit_object_id=_hit_object_id,
             clustering=_clustering,
             hit_et=_hit_et,
+            prediction_source=prediction_source,
         )
-        _match_table_rows = _truth_match_rows + event_fake_cluster_rows(oc_eval, event_idx)
+        _match_table_rows = _truth_match_rows + event_fake_cluster_rows(
+            oc_eval,
+            event_idx,
+            prediction_source=prediction_source,
+        )
         _truth_match_by_object = {int(row["object_id"]): row for row in _truth_match_rows}
         _energy_accounting = event_energy_accounting(
             hit_et=_hit_et,
@@ -1784,6 +2156,7 @@ def _(
             truth_match_rows=_truth_match_rows,
             oc_eval=oc_eval,
             event_idx=event_idx,
+            prediction_source=prediction_source,
         )
         _pred_energy_closure = (
             _energy_accounting["matched_pred_energy"]
@@ -2066,256 +2439,6 @@ def _(
         _fig.update_yaxes(title_text="Completeness [%]", range=[0, 105], row=4, col=5)
         return _fig
 
-    def event_seed_truth_matches(oc_eval, event_idx):
-        if oc_eval is None or getattr(oc_eval, "matches", None) is None:
-            raise ValueError("plot_true_vs_pred_oc requires oc_eval.matches for cluster matching.")
-        rows = [
-            row
-            for row in oc_eval.matches.to_dicts()
-            if int(row.get("event_idx", -1)) == int(event_idx)
-        ]
-        return {
-            int(row["seed_hit_idx"]): int(row["object_id"])
-            for row in rows
-            if row.get("seed_hit_idx") is not None and row.get("object_id") is not None
-        }
-
-    def event_table_rows(frame, event_idx):
-        if frame is None or frame.is_empty():
-            return []
-        return [row for row in frame.to_dicts() if int(row.get("event_idx", -1)) == int(event_idx)]
-
-    def event_hit_observables(
-        event,
-        event_idx,
-        valid_mask,
-        *,
-        eval_features=None,
-        eval_feature_names=None,
-    ):
-        if eval_features is not None and eval_feature_names is not None:
-            feature_names = list(eval_feature_names)
-            energy = np.asarray(
-                eval_features[event_idx, :, feature_names.index("energy")], dtype=np.float64
-            )[valid_mask]
-            x = np.asarray(eval_features[event_idx, :, feature_names.index("x")], dtype=np.float64)[
-                valid_mask
-            ]
-            y = np.asarray(eval_features[event_idx, :, feature_names.index("y")], dtype=np.float64)[
-                valid_mask
-            ]
-            z = np.asarray(eval_features[event_idx, :, feature_names.index("z")], dtype=np.float64)[
-                valid_mask
-            ]
-        else:
-            energy = np.asarray(event.hits.energy, dtype=np.float64)
-            x = np.asarray(event.hits.x, dtype=np.float64)
-            y = np.asarray(event.hits.y, dtype=np.float64)
-            z = np.asarray(event.hits.z, dtype=np.float64)
-            if len(energy) == len(valid_mask):
-                energy, x, y, z = energy[valid_mask], x[valid_mask], y[valid_mask], z[valid_mask]
-            elif len(energy) >= int(valid_mask.sum()):
-                n_valid = int(valid_mask.sum())
-                energy, x, y, z = energy[:n_valid], x[:n_valid], y[:n_valid], z[:n_valid]
-            else:
-                raise ValueError(
-                    "Cannot align event hit observables to the padded mask. Pass eval_features "
-                    "with unnormalized 'x', 'y', 'z', and 'energy' features."
-                )
-
-        from fastgnn.geometry import xyz_to_eta_phi
-
-        eta, _ = xyz_to_eta_phi(x, y, z)
-        return {"energy": energy, "et": energy / np.cosh(eta)}
-
-    def event_energy_accounting(
-        *,
-        hit_et,
-        hit_object_id,
-        clustering,
-        truth_match_rows,
-        oc_eval,
-        event_idx,
-    ):
-        pred_rows = event_table_rows(None if oc_eval is None else oc_eval.predicted, event_idx)
-        hit_et = np.asarray(hit_et, dtype=np.float64)
-        total = float(hit_et.sum())
-        signal = float(hit_et[hit_object_id > 0].sum())
-        noise = float(hit_et[hit_object_id == 0].sum())
-        assigned = float(hit_et[clustering >= 0].sum())
-        unassigned = float(hit_et[clustering < 0].sum())
-        matched_pred = sum(
-            float(row["sum_et_reco"])
-            for row in pred_rows
-            if row.get("matched") and row.get("sum_et_reco") is not None
-        )
-        fake_pred = sum(
-            float(row["sum_et_reco"])
-            for row in pred_rows
-            if row.get("fake") and row.get("sum_et_reco") is not None
-        )
-        recovered = sum(
-            float(row["recovered_et"])
-            for row in truth_match_rows
-            if row.get("recovered_et") is not None
-        )
-        return {
-            "valid_hit_energy": total,
-            "signal_hit_energy": signal,
-            "noise_hit_energy": noise,
-            "assigned_hit_energy": assigned,
-            "unassigned_hit_energy": unassigned,
-            "matched_pred_energy": matched_pred,
-            "fake_pred_energy": fake_pred,
-            "recovered_matched_energy": recovered,
-            "signal_energy_fraction": 100.0 * signal / total if total > 0 else 0.0,
-            "assigned_energy_fraction": 100.0 * assigned / total if total > 0 else 0.0,
-            "unassigned_energy_fraction": 100.0 * unassigned / total if total > 0 else 0.0,
-            "recovered_energy_fraction": 100.0 * recovered / total if total > 0 else 0.0,
-        }
-
-    def event_truth_match_summary(
-        oc_eval,
-        event_idx,
-        object_order,
-        *,
-        hit_object_id,
-        clustering,
-        hit_et,
-    ):
-        if oc_eval is None:
-            return []
-        truth_rows = event_table_rows(oc_eval.truth, event_idx)
-        match_rows = event_table_rows(oc_eval.matches, event_idx)
-        pred_rows = event_table_rows(oc_eval.predicted, event_idx)
-        match_by_object = {int(row["object_id"]): row for row in match_rows}
-        pred_by_cluster = {int(row["cluster_id_pred"]): row for row in pred_rows}
-
-        ordered_object_ids = list(object_order)
-        remaining_object_ids = sorted(
-            int(row["object_id"])
-            for row in truth_rows
-            if int(row["object_id"]) not in ordered_object_ids
-        )
-        ordered_object_ids.extend(remaining_object_ids)
-        truth_by_object = {int(row["object_id"]): row for row in truth_rows}
-
-        rows = []
-        for object_id in ordered_object_ids:
-            truth_row = truth_by_object.get(object_id)
-            if truth_row is None:
-                continue
-            match_row = match_by_object.get(object_id)
-            pred_row = (
-                None
-                if match_row is None
-                else pred_by_cluster.get(int(match_row["cluster_id_pred"]))
-            )
-            truth_ref_energy = truth_row.get("truth_energy")
-            truth_sum_energy = (
-                match_row.get("truth_sum_energy")
-                if match_row is not None
-                else truth_row.get("truth_sum_energy", truth_ref_energy)
-            )
-            truth_energy = truth_sum_energy
-            pred_energy = None if pred_row is None else pred_row.get("energy_pred")
-            truth_et = truth_row.get("truth_et")
-            pred_et = None if pred_row is None else pred_row.get("sum_et_reco")
-            seed_hit_idx = None if match_row is None else int(match_row["seed_hit_idx"])
-            recovered_et = None
-            if seed_hit_idx is not None:
-                overlap_mask = (hit_object_id == object_id) & (clustering == seed_hit_idx)
-                recovered_et = float(np.asarray(hit_et, dtype=np.float64)[overlap_mask].sum())
-            pred_over_truth_et = (
-                None
-                if pred_et is None or truth_et in (None, 0)
-                else float(pred_et) / float(truth_et)
-            )
-            energy_recovered_fraction = (
-                None if match_row is None else match_row.get("energy_recovered_fraction")
-            )
-            et_recovered_fraction = (
-                None
-                if recovered_et is None or truth_et in (None, 0)
-                else float(recovered_et) / float(truth_et)
-            )
-            et_assigned_fraction = (
-                None
-                if recovered_et is None or pred_et in (None, 0)
-                else float(recovered_et) / float(pred_et)
-            )
-            recovered_energy = (
-                None
-                if energy_recovered_fraction is None or truth_sum_energy is None
-                else float(energy_recovered_fraction) * float(truth_sum_energy)
-            )
-            rows.append(
-                {
-                    "object_id": object_id,
-                    "truth_energy": truth_energy,
-                    "truth_ref_energy": truth_ref_energy,
-                    "truth_sum_energy": truth_sum_energy,
-                    "truth_et": truth_et,
-                    "n_hits_truth": truth_row.get("n_hits_truth"),
-                    "nearest_truth_dist": truth_row.get("nearest_truth_dist"),
-                    "beta_max": truth_row.get("beta_max"),
-                    "matched": bool(truth_row.get("matched", False)),
-                    "n_hits_pred": None if pred_row is None else pred_row.get("n_hits_pred"),
-                    "energy_pred": pred_energy,
-                    "et_pred": pred_et,
-                    "pred_over_truth_et": pred_over_truth_et,
-                    "recovered_energy": recovered_energy,
-                    "recovered_et": recovered_et,
-                    "purity": None if match_row is None else match_row.get("purity"),
-                    "completeness": None if match_row is None else match_row.get("completeness"),
-                    "energy_recovered_fraction": energy_recovered_fraction,
-                    "et_recovered_fraction": et_recovered_fraction,
-                    "et_assigned_fraction": et_assigned_fraction,
-                    "energy_assigned_fraction": None
-                    if match_row is None
-                    else match_row.get("energy_assigned_fraction"),
-                }
-            )
-        return rows
-
-    def event_fake_cluster_rows(oc_eval, event_idx):
-        if oc_eval is None:
-            return []
-        pred_rows = event_table_rows(oc_eval.predicted, event_idx)
-        fake_rows = [
-            row
-            for row in pred_rows
-            if bool(row.get("fake", False)) and not bool(row.get("matched", False))
-        ]
-        fake_rows = sorted(
-            fake_rows,
-            key=lambda row: (
-                int(row.get("seed_hit_idx", -1))
-                if row.get("seed_hit_idx") is not None
-                else int(row.get("cluster_id_pred", -1))
-            ),
-        )
-        return [
-            {
-                "object_id": f"fakecluster seed {int(row['seed_hit_idx'])}",
-                "matched": False,
-                "truth_energy": None,
-                "energy_pred": row.get("energy_pred"),
-                "truth_et": None,
-                "et_pred": row.get("sum_et_reco"),
-                "recovered_et": None,
-                "n_hits_truth": None,
-                "n_hits_pred": row.get("n_hits_pred"),
-                "purity": None,
-                "completeness": None,
-                "et_recovered_fraction": None,
-                "et_assigned_fraction": None,
-                "beta_max": None,
-                "nearest_truth_dist": None,
-            }
-            for row in fake_rows
-        ]
-
     def format_match_table_value(value):
         if value is None:
             return "None"
@@ -2528,6 +2651,7 @@ def _(mo, np, oc_layout, test_ds, val_cluster_coords, val_data):
 @app.cell(hide_code=True)
 def _(
     best_oc_thresholds,
+    eval_feature_names,
     event_idx_selector,
     mo,
     mplhep,
@@ -2535,6 +2659,7 @@ def _(
     oc_eval,
     plot_true_vs_pred_oc,
     plt,
+    primary_regression_source_key,
     projection_mode_selector,
     test_data,
     test_ds,
@@ -2561,9 +2686,10 @@ def _(
         global_pca=oc_display_projection,
         mask=test_data["mask"],
         eval_features=test_eval_data["features"],
-        eval_feature_names=["x", "y", "z", "energy"],
+        eval_feature_names=eval_feature_names,
         oc_eval=oc_eval,
         event_idx=event_idx_selector.value,
+        prediction_source=primary_regression_source_key,
     )
     mplhep.style.use("CMS")
     mo.ui.plotly(_fig, config={"responsive": True})
