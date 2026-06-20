@@ -27,40 +27,102 @@ this configured task.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 
 from fastgnn.data.object_properties import compute_object_properties_from_links
 
-# Branch name prefixes
-HIT_PREFIX = "RecHitsL1THGCALTruthL1THGCAL"
-CLUSTER_PREFIX = "MergedSimClusterL1THGCAL"
+# Base branch-name prefixes (baseline L1THGCAL truth-merging chain). A merging
+# variant is selected by appending a suffix (e.g. "d0p5f0p4") to both prefixes; see
+# ``cmssw_branches``.
+HIT_BASE_PREFIX = "RecHitsL1THGCALTruthL1THGCAL"
+CLUSTER_BASE_PREFIX = "MergedSimClusterL1THGCAL"
 
-# Available hit features from NanoAOD
-HIT_X = f"{HIT_PREFIX}_x"
-HIT_Y = f"{HIT_PREFIX}_y"
-HIT_Z = f"{HIT_PREFIX}_z"
-HIT_ENERGY = f"{HIT_PREFIX}_energy"
-HIT_LAYER = f"{HIT_PREFIX}_layer"
-HIT_ZSIDE = f"{HIT_PREFIX}_zside"
-HIT_TIME = f"{HIT_PREFIX}_time"
 
-# Truth association.
-HIT_NCLUSTERS = f"{HIT_PREFIX}_nClusters"
-HIT_CLUSTER0 = f"{HIT_PREFIX}_cluster0"
-HIT_FRAC0 = f"{HIT_PREFIX}_frac0"
-HIT_CLUSTERS = tuple(f"{HIT_PREFIX}_cluster{i}" for i in range(4))
-HIT_FRACS = tuple(f"{HIT_PREFIX}_frac{i}" for i in range(4))
+@dataclass(frozen=True)
+class CmsswBranches:
+    """Resolved NanoAOD branch names for one HGCAL truth-merging sim chain.
 
-OBJECT_FIELDS = {
-    "impact_eta": f"{CLUSTER_PREFIX}_impact_eta",
-    "impact_phi": f"{CLUSTER_PREFIX}_impact_phi",
-    "impact_energy": f"{CLUSTER_PREFIX}_impact_energy",
-    "impact_pt": f"{CLUSTER_PREFIX}_impact_pt",
-    "sim_energy": f"{CLUSTER_PREFIX}_simEnergy",
-    "track_pdg_id": f"{CLUSTER_PREFIX}_track_pdgId",
-}
+    All hit/object branch names derive from a single ``merging`` suffix appended
+    identically to both prefixes, so the hit->SimCluster association indices stay
+    internally consistent. Use ``cmssw_branches`` to build one.
+    """
+
+    merging: str
+    hit_prefix: str
+    cluster_prefix: str
+    x: str
+    y: str
+    z: str
+    energy: str
+    layer: str
+    zside: str
+    time: str
+    nclusters: str
+    cluster0: str
+    frac0: str
+    clusters: tuple[str, ...]
+    fracs: tuple[str, ...]
+    object_fields: dict[str, str] = field(default_factory=dict)
+
+
+def cmssw_branches(merging: str | None = None) -> CmsswBranches:
+    """Build the resolved branch names for a merging chain (``None``/``""`` = baseline)."""
+    suffix = "" if merging in (None, "") else str(merging)
+    hit_prefix = f"{HIT_BASE_PREFIX}{suffix}"
+    cluster_prefix = f"{CLUSTER_BASE_PREFIX}{suffix}"
+    return CmsswBranches(
+        merging=suffix,
+        hit_prefix=hit_prefix,
+        cluster_prefix=cluster_prefix,
+        x=f"{hit_prefix}_x",
+        y=f"{hit_prefix}_y",
+        z=f"{hit_prefix}_z",
+        energy=f"{hit_prefix}_energy",
+        layer=f"{hit_prefix}_layer",
+        zside=f"{hit_prefix}_zside",
+        time=f"{hit_prefix}_time",
+        nclusters=f"{hit_prefix}_nClusters",
+        cluster0=f"{hit_prefix}_cluster0",
+        frac0=f"{hit_prefix}_frac0",
+        clusters=tuple(f"{hit_prefix}_cluster{i}" for i in range(4)),
+        fracs=tuple(f"{hit_prefix}_frac{i}" for i in range(4)),
+        object_fields={
+            "impact_eta": f"{cluster_prefix}_impact_eta",
+            "impact_phi": f"{cluster_prefix}_impact_phi",
+            "impact_energy": f"{cluster_prefix}_impact_energy",
+            "impact_pt": f"{cluster_prefix}_impact_pt",
+            "sim_energy": f"{cluster_prefix}_simEnergy",
+            "track_pdg_id": f"{cluster_prefix}_track_pdgId",
+        },
+    )
+
+
+def cmssw_branches_from_cfg(cfg: dict[str, Any]) -> CmsswBranches:
+    """Build branch names for the chain selected by ``cfg["merging"]``."""
+    return cmssw_branches(cfg.get("merging"))
+
+
+# Backward-compatible module-level constants for the baseline chain. These are kept
+# so existing imports (tests, diagnostics) that use them as dict keys keep working.
+_BASELINE = cmssw_branches("")
+HIT_PREFIX = _BASELINE.hit_prefix
+CLUSTER_PREFIX = _BASELINE.cluster_prefix
+HIT_X = _BASELINE.x
+HIT_Y = _BASELINE.y
+HIT_Z = _BASELINE.z
+HIT_ENERGY = _BASELINE.energy
+HIT_LAYER = _BASELINE.layer
+HIT_ZSIDE = _BASELINE.zside
+HIT_TIME = _BASELINE.time
+HIT_NCLUSTERS = _BASELINE.nclusters
+HIT_CLUSTER0 = _BASELINE.cluster0
+HIT_FRAC0 = _BASELINE.frac0
+HIT_CLUSTERS = _BASELINE.clusters
+HIT_FRACS = _BASELINE.fracs
+OBJECT_FIELDS = _BASELINE.object_fields
 
 # Raw properties are computed before vertex preprocessing. Processed properties
 # are available only when the preprocessing mode preserves meaningful hit energy.
@@ -97,15 +159,16 @@ def build_truth(
                             plus raw and supported processed object properties
     """
     processed_event = raw_event if processed_event is None else processed_event
-    objects = _extract_objects(raw_event)
+    branches = cmssw_branches_from_cfg(cfg)
+    objects = _extract_objects(raw_event, branches)
     n_objects = _object_count(objects)
-    raw_properties = _cmssw_object_properties(raw_event, n_objects, cfg)
+    raw_properties = _cmssw_object_properties(raw_event, n_objects, cfg, branches)
     objects.update({f"{name}_raw": values for name, values in raw_properties.items()})
     if processed_object_properties_supported(cfg):
-        objects.update(_cmssw_object_properties(processed_event, n_objects, cfg))
+        objects.update(_cmssw_object_properties(processed_event, n_objects, cfg, branches))
 
-    cluster0 = processed_event[HIT_CLUSTER0].astype(np.int32)
-    valid = _valid_cluster0(processed_event, n_objects)
+    cluster0 = processed_event[branches.cluster0].astype(np.int32)
+    valid = _valid_cluster0(processed_event, n_objects, branches)
     object_keep = _filter_truth_objects(objects, cfg)
 
     # Assign OC labels by indexing the lookup table with each hit's best cluster.
@@ -139,11 +202,14 @@ def compact_hit_object_ids(
     return compact, kept_indices
 
 
-def _extract_objects(raw_event: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+def _extract_objects(
+    raw_event: dict[str, np.ndarray],
+    branches: CmsswBranches,
+) -> dict[str, np.ndarray]:
     """Read CMSSW SimCluster branches into canonical object-field names."""
     return {
         name: raw_event[branch].astype(_object_dtype(name))
-        for name, branch in OBJECT_FIELDS.items()
+        for name, branch in branches.object_fields.items()
     }
 
 
@@ -205,10 +271,14 @@ def cmssw_object_links(
     raw_event: dict[str, np.ndarray],
     n_objects: int,
     cfg: dict[str, Any],
+    branches: CmsswBranches | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Build configured RecHit-to-SimCluster aggregation links."""
+    branches = cmssw_branches_from_cfg(cfg) if branches is None else branches
     slots, fractional = object_aggregation_spec(cfg)
-    return _links_for_slots(raw_event, n_objects, slots=slots, fractional=fractional)
+    return _links_for_slots(
+        raw_event, n_objects, slots=slots, fractional=fractional, branches=branches
+    )
 
 
 def object_aggregation_spec(cfg: dict[str, Any]) -> tuple[tuple[int, ...], bool]:
@@ -227,15 +297,19 @@ def _cmssw_object_properties(
     raw_event: dict[str, np.ndarray],
     n_objects: int,
     cfg: dict[str, Any],
+    branches: CmsswBranches | None = None,
 ) -> dict[str, np.ndarray]:
-    hit_indices, linked_object_ids, weights = cmssw_object_links(raw_event, n_objects, cfg)
+    branches = cmssw_branches_from_cfg(cfg) if branches is None else branches
+    hit_indices, linked_object_ids, weights = cmssw_object_links(
+        raw_event, n_objects, cfg, branches
+    )
     return compute_object_properties_from_links(
         {
-            "x": raw_event[HIT_X],
-            "y": raw_event[HIT_Y],
-            "z": raw_event[HIT_Z],
-            "energy": raw_event[HIT_ENERGY],
-            "layer": raw_event[HIT_LAYER],
+            "x": raw_event[branches.x],
+            "y": raw_event[branches.y],
+            "z": raw_event[branches.z],
+            "energy": raw_event[branches.energy],
+            "layer": raw_event[branches.layer],
         },
         hit_indices,
         linked_object_ids,
@@ -250,19 +324,20 @@ def _links_for_slots(
     *,
     slots: Iterable[int],
     fractional: bool,
+    branches: CmsswBranches = _BASELINE,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     hit_indices = []
     linked_object_ids = []
     weights = []
-    nclusters = raw_event[HIT_NCLUSTERS]
+    nclusters = raw_event[branches.nclusters]
     for slot in slots:
-        clusters = raw_event[HIT_CLUSTERS[slot]].astype(np.int32)
+        clusters = raw_event[branches.clusters[slot]].astype(np.int32)
         valid = (nclusters > slot) & (clusters >= 0) & (clusters < n_objects)
         selected_hits = np.flatnonzero(valid)
         hit_indices.append(selected_hits)
         linked_object_ids.append(clusters[valid])
         weights.append(
-            np.abs(raw_event[HIT_FRACS[slot]][valid]).astype(np.float32)
+            np.abs(raw_event[branches.fracs[slot]][valid]).astype(np.float32)
             if fractional
             else np.ones(len(selected_hits), dtype=np.float32)
         )
@@ -276,9 +351,13 @@ def _links_for_slots(
     )
 
 
-def _valid_cluster0(raw_event: dict[str, np.ndarray], n_objects: int) -> np.ndarray:
-    cluster0 = raw_event[HIT_CLUSTER0]
-    return (raw_event[HIT_NCLUSTERS] > 0) & (cluster0 >= 0) & (cluster0 < n_objects)
+def _valid_cluster0(
+    raw_event: dict[str, np.ndarray],
+    n_objects: int,
+    branches: CmsswBranches = _BASELINE,
+) -> np.ndarray:
+    cluster0 = raw_event[branches.cluster0]
+    return (raw_event[branches.nclusters] > 0) & (cluster0 >= 0) & (cluster0 < n_objects)
 
 
 def _preprocessing_mode(cfg: dict[str, Any]) -> str:
