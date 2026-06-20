@@ -1,19 +1,23 @@
 # @package _global_
 
 input_files:
-  - data/raw/cmssw/v1/NANO_10_000samples-new_pt50-100_merging-0.5cm-0.8_tau-0.root
-output_dir: data/processed/cmssw/v1/NANO_10_000samples-new_pt50-100_merging-0.5cm-0.8_tau/ThresholdRecHits-ClusterTransverseEnergyThreshold_1GeV-HitMinEnergy_0.2GeV
+  - /pub/scratch/lasfour/hgcal-clustering/fast-gnn-clustering/data/raw/cmssw/v2/NANO_trial_cocktail32_pt5-50_merging-0p5cm-0p6-fast1.root
+output_dir: data/processed/cmssw/v2/NANO_trial_cocktail32_pt5-50_merging-0p5cm-0p6-fast1.root/ThresholdRecHits-ClusterTransverseEnergyThreshold_0GeV-HitMinEnergy_0GeV
 max_events: null
 overwrite: false
+num_workers: 1
 
 zside: 1
+# HGCAL truth-merging sim chain to read. null = baseline L1THGCAL chain;
+# otherwise a branch suffix present in the ROOT file, e.g. d0p5f0p4 / d0p5f0p6 / d0p5f0p8.
+merging: null
 hit_features: [x, y, z, r, eta, phi, energy, et, layer, x_over_z, y_over_z, log_energy, log_et, cos_phi, sin_phi]
 log_floor: 1.0e-8
 preprocessing: rechits_energy_threshold
-hit_min_energy: 0.2
+hit_min_energy: null
 # Controls rechit links for always-stored raw and supported processed truth object properties.
 object_aggregation_mode: hard_assigned_full
-truth_min_object_energy: 1.0
+truth_min_object_energy: 0
 truth_min_sum_energy: 0
 truth_object_energy_field: impact_pt
 filter_truth_by_zside: true
