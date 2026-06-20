@@ -8,6 +8,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from fastgnn.data.base import EventRecord
+
 from .constants import HGCAL_Z
 
 _GREEK = [
@@ -87,6 +88,16 @@ def _cluster_color(hit_object_id: int) -> str:
     return _PALETTE[(hit_object_id - 1) % len(_PALETTE)]
 
 
+_OBJECT_THRESHOLD_LABELS = {
+    "impact_energy": "impact energy",
+    "impact_pt": "impact pT",
+}
+
+
+def _threshold_label_from_field(field: str) -> str:
+    return _OBJECT_THRESHOLD_LABELS.get(field, field.replace("_", " "))
+
+
 def plot_event(
     event: EventRecord,
     color_by: Literal["energy", "hit_object_id"] = "energy",
@@ -94,6 +105,7 @@ def plot_event(
     views: Sequence[EventView] | None = None,
     show_cluster_markers: bool = True,
     energy_threshold: float = 0.0,
+    cluster_threshold_field: str = "impact_energy",
     show_clusters_below_threshold: bool = True,
     width: int | None = None,
     height: int = 580,
@@ -106,9 +118,12 @@ def plot_event(
     """
     event.hits.require("x", "y", "z", "energy")
     event.truth.require("hit_object_id", "objects")
-    event.truth.objects.require("impact_eta", "impact_phi", "impact_energy", "track_pdg_id")
+    event.truth.objects.require(
+        "impact_eta", "impact_phi", "impact_energy", cluster_threshold_field, "track_pdg_id"
+    )
 
     mode = "truth" if color_by == "hit_object_id" else "energy"
+    threshold_values = getattr(event.truth.objects, cluster_threshold_field)
     return plot_event_display(
         h_x=event.hits.x,
         h_y=event.hits.y,
@@ -124,6 +139,8 @@ def plot_event(
         views=views,
         show_cluster_markers=show_cluster_markers,
         energy_threshold=energy_threshold,
+        cluster_threshold_values=threshold_values,
+        cluster_threshold_label=_threshold_label_from_field(cluster_threshold_field),
         show_clusters_below_threshold=show_clusters_below_threshold,
         event_idx=event.event_id,
         width=width,
@@ -146,6 +163,9 @@ def plot_event_display(
     views: Sequence[EventView] | None = None,
     show_cluster_markers: bool = True,
     energy_threshold: float = 0.0,
+    cluster_threshold_values: np.ndarray | None = None,
+    cluster_threshold_label: str = "impact energy",
+    cluster_threshold_unit: str = "GeV",
     show_clusters_below_threshold: bool = True,
     event_idx: int | None = None,
     width: int | None = None,
@@ -174,6 +194,8 @@ def plot_event_display(
             c_pdg=event["cluster_track_pdgId"],# Cluster particle ID
             mode="truth",                      # "energy" | "truth"
             energy_threshold=2.0,              # Optional: filter summary by energy
+            cluster_threshold_values=event["cluster_impact_pt"],
+            cluster_threshold_label="impact pT",
         )
 
         print(summary)
@@ -189,8 +211,20 @@ def plot_event_display(
     c_x, c_y, c_z = etaphi_to_xy_at_z(c_eta, c_phi, z=HGCAL_Z)
     c_names = [_pdgid_to_name(p) for p in c_pdg]
 
-    mask_above = c_e > energy_threshold
+    threshold_values = c_e if cluster_threshold_values is None else np.asarray(cluster_threshold_values)
+    if threshold_values.shape != np.asarray(c_e).shape:
+        raise ValueError(
+            "cluster_threshold_values must have the same shape as c_e, "
+            f"got {threshold_values.shape} and {np.asarray(c_e).shape}"
+        )
+    threshold_label = cluster_threshold_label.strip() or "threshold"
+    threshold_unit = cluster_threshold_unit.strip()
+    threshold_suffix = f" {threshold_unit}" if threshold_unit else ""
+    threshold_text = f"{threshold_label} {energy_threshold:g}{threshold_suffix}"
+
+    mask_above = threshold_values > energy_threshold
     mask_below = ~mask_above
+    below_threshold_object_ids = set((np.flatnonzero(mask_below) + 1).tolist())
 
     # Build figure
     fig = make_subplots(
@@ -208,10 +242,21 @@ def plot_event_display(
     else:
         # hit_object_id is 1-indexed into c_names/c_e (0 = noise)
         object_labels = {0: "Noise"}
-        for i, (name, energy) in enumerate(zip(c_names, c_e)):
-            object_labels[i + 1] = f"{name} {energy:.2f} GeV"
+        for i, (name, energy, threshold_value) in enumerate(zip(c_names, c_e, threshold_values)):
+            object_labels[i + 1] = (
+                f"{name} E={energy:.2f} GeV, {threshold_label}={threshold_value:.2f}"
+                f"{threshold_suffix}"
+            )
         _add_truth_traces(
-            fig, h_x, h_y, h_z, h_e, hit_object_id, object_labels, views=selected_views
+            fig,
+            h_x,
+            h_y,
+            h_z,
+            h_e,
+            hit_object_id,
+            object_labels,
+            views=selected_views,
+            below_threshold_object_ids=below_threshold_object_ids,
         )
 
     # SimCluster impact points
@@ -222,9 +267,12 @@ def plot_event_display(
             c_y[mask_above],
             c_z[mask_above],
             c_e[mask_above],
+            threshold_values[mask_above],
             [n for n, m in zip(c_names, mask_above) if m],
             color="red",
             label="Clusters",
+            threshold_label=threshold_label,
+            threshold_unit=threshold_unit,
             views=selected_views,
         )
     if show_clusters_below_threshold and mask_below.any():
@@ -234,9 +282,12 @@ def plot_event_display(
             c_y[mask_below],
             c_z[mask_below],
             c_e[mask_below],
+            threshold_values[mask_below],
             [n for n, m in zip(c_names, mask_below) if m],
             color="grey",
             label="Clusters (below threshold)",
+            threshold_label=threshold_label,
+            threshold_unit=threshold_unit,
             views=selected_views,
         )
 
@@ -268,7 +319,7 @@ def plot_event_display(
             )
 
     title = f"Event {event_idx} | " if event_idx is not None else ""
-    title += f"Mode: {mode} | {len(h_x)} hits ({int((hit_object_id > 0).sum())} signal, {int((hit_object_id == 0).sum())} noise) | {np.sum(mask_above)} clusters above {energy_threshold} GeV"
+    title += f"Mode: {mode} | {len(h_x)} hits ({int((hit_object_id > 0).sum())} signal, {int((hit_object_id == 0).sum())} noise) | {np.sum(mask_above)} clusters above {threshold_text}"
     fig.update_layout(
         title=title,
         width=figure_width,
@@ -323,16 +374,22 @@ def plot_event_display(
         )
 
     # Particle summary markdown
-    above = [(n, e) for n, e, m in zip(c_names, c_e, mask_above) if m]
-    below = [(n, e) for n, e, m in zip(c_names, c_e, mask_below) if m]
-    above_sorted = sorted(above, key=lambda x: x[1], reverse=True)
-    below_sorted = sorted(below, key=lambda x: x[1], reverse=True)
+    above = [(n, e, t) for n, e, t, m in zip(c_names, c_e, threshold_values, mask_above) if m]
+    below = [(n, e, t) for n, e, t, m in zip(c_names, c_e, threshold_values, mask_below) if m]
+    above_sorted = sorted(above, key=lambda x: x[2], reverse=True)
+    below_sorted = sorted(below, key=lambda x: x[2], reverse=True)
 
-    summary = f"**Particles above {energy_threshold} GeV ({len(above_sorted)}):** "
-    summary += ", ".join(f"{n} ({e:.2f} GeV)" for n, e in above_sorted) or "—"
+    def _particle_summary(name: str, energy: float, threshold_value: float) -> str:
+        return (
+            f"{name} ({threshold_label} {threshold_value:.2f}{threshold_suffix}, "
+            f"E {energy:.2f} GeV)"
+        )
+
+    summary = f"**Particles above {threshold_text} ({len(above_sorted)}):** "
+    summary += ", ".join(_particle_summary(n, e, t) for n, e, t in above_sorted) or "—"
     if below_sorted:
         summary += f"\n\n**Particles below threshold ({len(below_sorted)}):** "
-        summary += ", ".join(f"{n} ({e:.2f} GeV)" for n, e in below_sorted)
+        summary += ", ".join(_particle_summary(n, e, t) for n, e, t in below_sorted)
 
     return fig, summary
 
@@ -503,6 +560,7 @@ def _add_truth_traces(
     hit_object_id: np.ndarray,
     object_labels: dict[int, str],
     views: Sequence[EventView],
+    below_threshold_object_ids: set[int] | None = None,
 ) -> None:
     """
     Add hit traces coloured by SimCluster assignment (hit_object_id).
@@ -513,14 +571,16 @@ def _add_truth_traces(
     sorted_objects = [0] + sorted(
         cluster_energies, key=lambda obj: cluster_energies[obj], reverse=True
     )
+    below_threshold_object_ids = below_threshold_object_ids or set()
 
     for obj in sorted_objects:
         mask = hit_object_id == obj
-        color = _cluster_color(obj)
+        is_below_threshold = obj in below_threshold_object_ids
+        color = "#888888" if is_below_threshold else _cluster_color(obj)
         label = object_labels.get(obj, f"Cluster {obj}")
         size_2d = 2 if obj == 0 else np.clip(3 + 3 * np.sqrt(h_e[mask]), 2, 10).tolist()
         size_3d = 1 if obj == 0 else np.clip(2 + 2 * np.sqrt(h_e[mask]), 1, 6).tolist()
-        opacity = 0.3 if obj == 0 else 0.85
+        opacity = 0.3 if obj == 0 else (0.45 if is_below_threshold else 0.85)
 
         hover = f"x=%{{x:.2f}}<br>y=%{{y:.2f}}<br>E=%{{customdata:.4f}} GeV<extra>{label}</extra>"
         hover3d = (
@@ -587,23 +647,30 @@ def _add_cluster_markers(
     c_y,
     c_z,
     c_e,
+    c_threshold,
     c_names,
     color: str,
     label: str,
+    threshold_label: str,
+    threshold_unit: str,
     views: Sequence[EventView],
 ) -> None:
     """Add SimCluster impact point markers to XY and 3D views."""
     if len(c_x) == 0:
         return
 
+    threshold_suffix = f" {threshold_unit}" if threshold_unit else ""
     hover = (
         "<b>%{text}</b><br>x=%{x:.2f}<br>y=%{y:.2f}<br>"
-        "E=%{customdata:.3f} GeV<extra>Cluster</extra>"
+        "E=%{customdata[0]:.3f} GeV<br>"
+        f"{threshold_label}=%{{customdata[1]:.3f}}{threshold_suffix}<extra>Cluster</extra>"
     )
     hover3d = (
         "<b>%{text}</b><br>x=%{x:.2f}<br>y=%{y:.2f}<br>z=%{z:.2f}<br>"
-        "E=%{customdata:.3f} GeV<extra>Cluster</extra>"
+        "E=%{customdata[0]:.3f} GeV<br>"
+        f"{threshold_label}=%{{customdata[1]:.3f}}{threshold_suffix}<extra>Cluster</extra>"
     )
+    customdata = np.column_stack([c_e, c_threshold])
 
     if "xy" in views:
         fig.add_trace(
@@ -615,7 +682,7 @@ def _add_cluster_markers(
                 marker=dict(size=14, color=color, line=dict(color="black", width=1)),
                 name=label,
                 legendgroup=label,
-                customdata=c_e,
+                customdata=customdata,
                 hovertemplate=hover,
             ),
             row=1,
@@ -632,10 +699,11 @@ def _add_cluster_markers(
                 name=label,
                 legendgroup=label,
                 showlegend="xy" not in views,
-                customdata=c_e,
+                customdata=customdata,
                 hovertemplate=(
                     "<b>%{text}</b><br>y=%{x:.2f}<br>z=%{y:.2f}<br>"
-                    "E=%{customdata:.3f} GeV<extra>Cluster</extra>"
+                    "E=%{customdata[0]:.3f} GeV<br>"
+                    f"{threshold_label}=%{{customdata[1]:.3f}}{threshold_suffix}<extra>Cluster</extra>"
                 ),
             ),
             row=1,
@@ -653,7 +721,7 @@ def _add_cluster_markers(
                 name=label,
                 legendgroup=label,
                 showlegend=("xy" not in views and "yz" not in views),
-                customdata=c_e,
+                customdata=customdata,
                 hovertemplate=hover3d,
             ),
             row=1,
