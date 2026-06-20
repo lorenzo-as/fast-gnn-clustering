@@ -88,15 +88,51 @@ def _():
 
 
 @app.cell(hide_code=True)
-def _(CaloDataset, OUTPUT_DIR, PRJ_ROOT, Path, mo, np, runs_table, yaml):
-    def load_run(dir_path: Path, skip_model: bool = False):
-        if skip_model:
+def _(OUTPUT_DIR, Path, mo, runs_table):
+    mo.stop(
+        len(runs_table.value) == 0 or runs_table.value["path"][0] is None,
+        mo.md(""),
+    )
+    _run_dir = OUTPUT_DIR / Path(runs_table.value["path"][0])
+
+    _model_files = {}
+    if (_run_dir / "best_model.keras").exists():
+        _model_files["best_model"] = "best_model"
+    for _ckpt in sorted(_run_dir.glob("checkpoint_epoch*.keras")):
+        _ep = str(int(_ckpt.stem.replace("checkpoint_epoch", "")))
+        _model_files[f"ep {_ep}"] = _ckpt.name
+    if (_run_dir / "final_model.keras").exists():
+        _model_files["final_model"] = "final_model.keras"
+
+    model_file_selector = mo.ui.dropdown(
+        options=_model_files,
+        label="Model checkpoint",
+        value=next(iter(_model_files.values())) if _model_files else None,
+    )
+    model_file_selector
+    return (model_file_selector,)
+
+
+@app.cell(hide_code=True)
+def _(
+    CaloDataset,
+    OUTPUT_DIR,
+    PRJ_ROOT,
+    Path,
+    mo,
+    model_file_selector,
+    np,
+    runs_table,
+    yaml,
+):
+    def load_run(dir_path: Path, model_file: str | None = "best_model.keras"):
+        if model_file is None:
             best_model = None
         else:
             import qgravnet
             import tensorflow as tf
 
-            best_model = tf.keras.models.load_model(dir_path / "best_model.keras", compile=False)
+            best_model = tf.keras.models.load_model(dir_path / model_file, compile=False)
         if (dir_path / "history.npy").exists():
             history = np.load(dir_path / "history.npy", allow_pickle=True).item()
         else:
@@ -112,7 +148,7 @@ def _(CaloDataset, OUTPUT_DIR, PRJ_ROOT, Path, mo, np, runs_table, yaml):
     )
     selected_run = Path(runs_table.value["path"][0])
     selected_run_dir = OUTPUT_DIR / selected_run
-    best_model, history, config = load_run(selected_run_dir)
+    best_model, history, config = load_run(selected_run_dir, model_file=model_file_selector.value)
     test_ds = CaloDataset(PRJ_ROOT / config["data"]["dataset_dir"], split="test")
     messages = [
         f"Loaded {'model, ' if best_model is not None else ''}history, and config for run: `{selected_run}`",
