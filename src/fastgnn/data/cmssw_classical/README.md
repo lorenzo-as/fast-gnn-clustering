@@ -16,3 +16,13 @@ Label semantics:
 
 The converter requires an explicit `zside` of `1` or `-1`; it does not implement
 automatic endcap selection.
+
+Event metadata:
+
+- The top-level converted `event_id` is the canonical processed dataset id. It is
+  assigned in output order and remains stable for `CaloDataset` indexing.
+- `metadata.source_file` stores the ROOT file path that produced the converted
+  event.
+- `metadata.source_event_id`, when present, is copied from a top-level scalar
+  `event` branch in the ROOT tree for manual lookup in the source file.
+- ROOT entry/index metadata is not stored.

@@ -30,7 +30,7 @@ TC_FIELDS = (
     "tc_y",
     "tc_z",
 )
-OPTIONAL_FIELDS = ("tc_n",)
+OPTIONAL_FIELDS = ("tc_n", "event")
 VALIDATION_FIELDS = ("tc_x", "tc_y", "tc_z", "tc_eta", "tc_phi", "tc_energy", "tc_pt", "tc_layer")
 
 
@@ -78,7 +78,11 @@ def validate_branches(file_path: str | Path, tree_path: str) -> list[str]:
 def filter_trigger_cells(arrays: ak.Array, zside: int) -> ak.Array:
     """Filter trigger-cell jagged fields to one endcap, preserving event rows."""
     mask = arrays["tc_zside"] == zside
-    return ak.zip({field: arrays[field][mask] for field in TC_FIELDS}, depth_limit=1)
+    filtered = {field: arrays[field][mask] for field in TC_FIELDS}
+    for field in arrays.fields:
+        if field not in filtered:
+            filtered[field] = arrays[field]
+    return ak.zip(filtered, depth_limit=1)
 
 
 def nonempty_events(arrays: ak.Array) -> ak.Array:

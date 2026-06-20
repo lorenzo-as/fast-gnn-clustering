@@ -101,6 +101,7 @@ def convert_cmssw_classical_root(
                 _event_to_record(
                     kept_event,
                     event_id=len(records),
+                    source_file=input_file,
                     cfg=cfg,
                     hit_features=hit_features,
                     store_derived_features=store_derived,
@@ -141,12 +142,22 @@ def _event_to_record(
     kept_event: Mapping[str, np.ndarray],
     *,
     event_id: int,
+    source_file: str | Path,
     cfg: Mapping[str, Any],
     hit_features: list[str],
     store_derived_features: bool,
 ) -> dict[str, Any]:
     hits = _build_hits(kept_event, cfg, hit_features, store_derived_features)
     n_hits = len(hits["tc_x"])
+    metadata = {
+        "source": "cmssw_classical",
+        "source_file": str(Path(source_file)),
+        "zside": int(cfg["zside"]),
+        "inference_only": True,
+    }
+    source_event_id = _optional_scalar_int(kept_event.get("event"))
+    if source_event_id is not None:
+        metadata["source_event_id"] = source_event_id
     return {
         "event_id": int(event_id),
         "hits": hits,
@@ -154,12 +165,19 @@ def _event_to_record(
             "hit_object_id": np.full(n_hits, UNLABELED_OBJECT_ID, dtype=np.int32),
             "objects": {EMPTY_OBJECTS_SENTINEL_FIELD: np.asarray([], dtype=np.float32)},
         },
-        "metadata": {
-            "source": "cmssw_classical",
-            "zside": int(cfg["zside"]),
-            "inference_only": True,
-        },
+        "metadata": metadata,
     }
+
+
+def _optional_scalar_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    array = np.asarray(value)
+    if array.shape == ():
+        return int(array.item())
+    if array.size != 1:
+        return None
+    return int(array.reshape(-1)[0])
 
 
 def _build_hits(

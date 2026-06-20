@@ -44,6 +44,7 @@ def test_cmssw_classical_conversion_zside_positive(tmp_path: Path) -> None:
     assert CaloDataset(output_dir, split="val").events.tolist() == []
 
     event = ds[0]
+    assert event.event_id == 0
     np.testing.assert_array_equal(event.hits.tc_id, np.array([101, 103]))
     np.testing.assert_array_equal(event.hits.tc_zside, np.array([1, 1], dtype=np.int8))
     np.testing.assert_array_equal(event.hits.zside, np.array([1, 1], dtype=np.int8))
@@ -56,6 +57,8 @@ def test_cmssw_classical_conversion_zside_positive(tmp_path: Path) -> None:
         event.truth.hit_object_id,
         np.full(2, UNLABELED_OBJECT_ID, dtype=np.int32),
     )
+    assert event.metadata.source_file == str(root_path)
+    assert event.metadata.source_event_id == 9001
 
     padded = ds.as_padded(max_vertices=4, normalize_features=False)
     assert padded["features"].shape == (1, 4, 8)
@@ -110,6 +113,22 @@ def test_cmssw_classical_conversion_zside_negative(tmp_path: Path) -> None:
     assert ds.hit_features == ["x", "y", "z", "energy", "pt", "layer"]
 
 
+def test_cmssw_classical_conversion_omits_missing_source_event_id(tmp_path: Path) -> None:
+    root_path = _write_classical_root(tmp_path / "input.root", include_event=False)
+    output_dir = tmp_path / "processed_no_source_event_id"
+
+    convert_cmssw_classical_root(
+        [root_path],
+        output_dir,
+        config={"zside": 1},
+    )
+
+    event = CaloDataset(output_dir, split="test")[0]
+    assert event.event_id == 0
+    assert event.metadata.source_file == str(root_path)
+    assert "source_event_id" not in event.metadata
+
+
 def test_cmssw_classical_store_aliases_only(tmp_path: Path) -> None:
     root_path = _write_classical_root(tmp_path / "input.root")
     output_dir = tmp_path / "processed_alias_only"
@@ -156,7 +175,7 @@ def test_build_current_cmssw_features_matches_current_feature_names() -> None:
     np.testing.assert_allclose(features["r"], np.array([5.0], dtype=np.float32))
 
 
-def _write_classical_root(path: Path) -> Path:
+def _write_classical_root(path: Path, *, include_event: bool = True) -> Path:
     arrays = {
         "tc_n": np.array([3, 2], dtype=np.int32),
         "tc_id": ak.Array([[101, 102, 103], [201, 202]]),
@@ -177,6 +196,8 @@ def _write_classical_root(path: Path) -> Path:
         "tc_y": ak.Array([[1.0, 2.0, 3.0], [4.0, 5.0]]),
         "tc_z": ak.Array([[320.0, -320.0, 320.0], [-320.0, -320.0]]),
     }
+    if include_event:
+        arrays["event"] = np.array([9001, 9002], dtype=np.int64)
     with uproot.recreate(path) as root_file:
         root_file["l1tHGCalTriggerNtuplizer/HGCalTriggerNtuple"] = arrays
     return path
