@@ -67,10 +67,16 @@ def _read_splits(dataset_dir: Path) -> dict[str, np.ndarray]:
         return {name: np.asarray(data[name], dtype=np.int64) for name in data.files}
 
 
-def _to_numpy(value: Any) -> np.ndarray:
+def _to_numpy(value: Any) -> Any:
     """Convert an Awkward scalar/list field to a NumPy-friendly value."""
     if isinstance(value, np.ndarray):
         return value
+    try:
+        python_value = ak.to_list(value)
+        if isinstance(python_value, str | int | float | bool) or python_value is None:
+            return python_value
+    except Exception:
+        pass
     try:
         return ak.to_numpy(value)
     except Exception:
