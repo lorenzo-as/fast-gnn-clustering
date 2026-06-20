@@ -7,7 +7,7 @@
 
 import marimo
 
-__generated_with = "0.23.6"
+__generated_with = "0.23.9"
 app = marimo.App(width="medium")
 
 
@@ -21,13 +21,13 @@ def _():
 
     from fastgnn import get_project_root
     from fastgnn.data import CaloDataset
-    from fastgnn.data.cmssw.plotting import plot_event
+    from fastgnn.data.cmssw.plotting import plot_event, plot_event_display
     from fastgnn.datasets import DatasetRegistry
 
     mplhep.style.use("CMS")
 
     PROJECT_ROOT = get_project_root()
-    PROCESSED_DIR = PROJECT_ROOT / "data/processed/cmssw"
+    PROCESSED_DIR = PROJECT_ROOT / "data/processed/cmssw_classical"
     return (
         CaloDataset,
         DatasetRegistry,
@@ -37,6 +37,7 @@ def _():
         mplhep,
         np,
         plot_event,
+        plot_event_display,
         plt,
     )
 
@@ -109,15 +110,16 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(NBINS, ak, data, mplhep, np, plt):
+def _(NBINS, ak, data, mo, mplhep, np, plt):
     _fig, _axs = plt.subplots(1, 2, figsize=(15, 6))
     _axs = _axs.flatten()
 
-    # distribution of number of hits per event, separated by signal vs noise
+    # distribution of number of hits per event, separated by signal/noise/unlabeled labels
     _n_total = ak.to_numpy(ak.num(data.hits.x))
     _n_sig = ak.to_numpy(ak.sum(data.truth.hit_object_id > 0, axis=1))
     _n_noise = ak.to_numpy(ak.sum(data.truth.hit_object_id == 0, axis=1))
-    assert ak.all(_n_total == _n_sig + _n_noise)
+    _n_unlabeled = ak.to_numpy(ak.sum(data.truth.hit_object_id == -10, axis=1))
+    assert ak.all(_n_total == _n_sig + _n_noise + _n_unlabeled), "Mismatch in hit counts per event."
     _hist_sig_and_noise, _edges = np.histogram(_n_total, bins=NBINS)
 
     _ax = _axs[0]
@@ -139,31 +141,46 @@ def _(NBINS, ak, data, mplhep, np, plt):
     _ax.set_ylabel("Number of events")
     mplhep.yscale_legend(soft_fail=True)
 
-    # distribution of hit energy, separated by signal vs noise
+    # distribution of hit energy, separated by signal/noise/unlabeled labels
     _sig_mask = data.truth.hit_object_id > 0
-    _energy_sig = ak.flatten(data.hits.energy[_sig_mask])
-    _energy_noise = ak.flatten(data.hits.energy[~_sig_mask])
+    _noise_mask = data.truth.hit_object_id == 0
+    _unlabeled_mask = data.truth.hit_object_id == -10
+    _energy_sig = ak.to_numpy(ak.flatten(data.hits.energy[_sig_mask]))
+    _energy_noise = ak.to_numpy(ak.flatten(data.hits.energy[_noise_mask]))
+    _energy_unlabeled = ak.to_numpy(ak.flatten(data.hits.energy[_unlabeled_mask]))
+    _energy_groups = [
+        _energy for _energy in (_energy_sig, _energy_noise, _energy_unlabeled) if len(_energy) > 0
+    ]
+    _energy_labels = [
+        _label
+        for _label, _energy in zip(
+            ["Signal hits", "Noise hits", "Unlabeled hits"],
+            [_energy_sig, _energy_noise, _energy_unlabeled],
+            strict=True,
+        )
+        if len(_energy) > 0
+    ]
+    mo.stop(
+        len(_energy_groups) == 0,
+        mo.md("No hit energies are available after the current dataset selection."),
+    )
 
     _exp_range = -3, 3
     _edges = np.logspace(-3, 3, NBINS)
-    assert ak.all((_energy_sig >= _edges[0]) & (_energy_sig <= _edges[-1])) and ak.all(
-        (_energy_noise >= _edges[0]) & (_energy_noise <= _edges[-1])
-    ), (
+    _all_energy = np.concatenate(_energy_groups)
+    assert np.all((_all_energy >= _edges[0]) & (_all_energy <= _edges[-1])), (
         "Some hit energies are outside the expected range. Check the data or adjust the histogram edges."
     )
-    _hist_sig, _edges = np.histogram(
-        _energy_sig, bins=_edges, range=(0, np.percentile(_energy_sig, 99))
-    )
-    _hist_noise, _ = np.histogram(_energy_noise, bins=_edges)
+    _hists = [np.histogram(_energy, bins=_edges)[0] for _energy in _energy_groups]
 
     _ax = _axs[1]
     mplhep.histplot(
-        [_hist_sig, _hist_noise],
+        _hists,
         bins=_edges,
         histtype="fill",
         alpha=0.7,
         ax=_ax,
-        label=["Signal hits", "Noise hits"],
+        label=_energy_labels,
     )
     _ax.set_xticks([10**i for i in range(_exp_range[0], _exp_range[1] + 1)])
     _ax.set_xlim(10 ** _exp_range[0], 10 ** _exp_range[1])
@@ -189,10 +206,16 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(ds, mo):
-    _preprocessing_cluster_energy_threshold = ds.metadata["preprocessing"][
+def _(data, ds, mo):
+    mo.stop(
+        len(data.truth.objects.fields) == 0,
+        mo.md(
+            "This dataset has no truth objects, so SimCluster-level statistics are not available."
+        ),
+    )
+    _preprocessing_cluster_energy_threshold = ds.metadata.get("preprocessing", {}).get(
         "truth_min_object_energy"
-    ]
+    )
     mo.stop(
         _preprocessing_cluster_energy_threshold is not None
         and _preprocessing_cluster_energy_threshold > 0,
@@ -200,17 +223,43 @@ def _(ds, mo):
             "Dataset was preprocessed with a minimum truth object energy > 0, so cluster energy threshold selection is not applicable."
         ),
     )
+
+    # Threshold variable: E_T is derived as E / cosh(eta); other options are
+    # stored object fields. Only offer what the dataset actually provides.
+    _object_fields = data.truth.objects.fields
+    _threshold_field_options = {}
+    if "impact_energy" in _object_fields and "impact_eta" in _object_fields:
+        _threshold_field_options["E_T (transverse energy) [GeV]"] = "impact_et"
+    if "impact_energy" in _object_fields:
+        _threshold_field_options["E (energy) [GeV]"] = "impact_energy"
+    if "impact_pt" in _object_fields:
+        _threshold_field_options["p_T (transverse momentum) [GeV]"] = "impact_pt"
+
+    cluster_threshold_field_selector = mo.ui.dropdown(
+        options=_threshold_field_options,
+        value=next(iter(_threshold_field_options)),
+        label="Cluster threshold variable",
+    )
     cluster_energy_threshold_selector = mo.ui.text(
-        label="Cluster energy thresholds [GeV]",
+        label="Cluster thresholds",
         value="0, 1,",
         full_width=True,
     )
-    cluster_energy_threshold_selector
-    return (cluster_energy_threshold_selector,)
+    mo.vstack([cluster_threshold_field_selector, cluster_energy_threshold_selector])
+    return cluster_energy_threshold_selector, cluster_threshold_field_selector
 
 
 @app.cell(hide_code=True)
-def _(NBINS, ak, cluster_energy_threshold_selector, data, mplhep, np, plt):
+def _(
+    NBINS,
+    ak,
+    cluster_energy_threshold_selector,
+    cluster_threshold_field_selector,
+    data,
+    mplhep,
+    np,
+    plt,
+):
     _thresholds = np.array(
         [
             float(_threshold.strip())
@@ -230,34 +279,63 @@ def _(NBINS, ak, cluster_energy_threshold_selector, data, mplhep, np, plt):
 
     _colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
+    # Selected threshold variable. E_T is derived from E and eta; everything
+    # else is a stored object field.
+    _threshold_field = cluster_threshold_field_selector.value
+    _THRESHOLD_SYMBOL = {
+        "impact_et": r"E_\mathrm{T}",
+        "impact_energy": r"E",
+        "impact_pt": r"p_\mathrm{T}",
+    }
+    _threshold_symbol = _THRESHOLD_SYMBOL.get(_threshold_field, _threshold_field)
+    if _threshold_field == "impact_et":
+        _threshold_values_field = data.truth.objects.impact_energy / np.cosh(
+            data.truth.objects.impact_eta
+        )
+    else:
+        _threshold_values_field = data.truth.objects[_threshold_field]
+
     def _threshold_label(_threshold, _extra=""):
-        _label = rf"$E_\mathrm{{C}} > {_threshold:.1f}$ GeV"
+        _label = rf"${_threshold_symbol} > {_threshold:.1f}$ GeV"
         return f"{_label}{_extra}"
 
     def _values_for_threshold(_field, _threshold):
-        _mask = _base_mask & (data.truth.objects.impact_energy > _threshold)
+        _mask = _base_mask & (_threshold_values_field > _threshold)
         return ak.to_numpy(ak.flatten(_field[_mask]))
 
     def _finite_values(_field):
         _values = ak.to_numpy(ak.flatten(_field[_base_mask]))
         return _values[np.isfinite(_values)]
 
-    def _linear_edges(_values, _lower=None, _upper=None):
+    def _linear_edges(_values, _lower=None, _upper=None, _quantile=0.95):
+        # Cap the upper edge at a quantile so heavy tails don't stretch the
+        # axis; out-of-range values are clipped into the edge bins when plotted.
         assert len(_values) > 0, (
             "No valid values found to determine histogram edges. Check the data or adjust the filters."
         )
-        _min_val = np.min(_values)
-        _max_val = np.max(_values)
-        _lo = _min_val if _lower is None else _lower
-        _hi = _max_val if _upper is None else _upper
-        assert _min_val >= _lo and _max_val <= _hi, (
-            f"Some values are outside the specified range [{_lo}, {_hi}]. Check the data or adjust the range."
-        )
+        _lo = np.min(_values) if _lower is None else _lower
+        _hi = np.quantile(_values, _quantile) if _upper is None else _upper
+        if _hi <= _lo:
+            _hi = _lo + 1.0
         return np.linspace(_lo, _hi, NBINS)
 
-    def _plot_overlaid_hist(_ax, _field, _edges, _xlabel, _ylabel, _yscale="log"):
+    def _log_edges(_values, _lower=None, _upper=None, _quantile=0.95):
+        # Log-spaced robust edges; only positive values define the range.
+        _values = np.asarray(_values)
+        _positive = _values[_values > 0]
+        assert len(_positive) > 0, "No positive values found to determine log histogram edges."
+        _lo = np.min(_positive) if _lower is None else _lower
+        _hi = np.quantile(_positive, _quantile) if _upper is None else _upper
+        if _hi <= _lo:
+            _hi = _lo * 10.0
+        return np.logspace(np.log10(_lo), np.log10(_hi), NBINS)
+
+    def _plot_overlaid_hist(_ax, _field, _edges, _xlabel, _ylabel, _yscale="log", _xscale=None):
         for _idx, _threshold in enumerate(_thresholds):
             _values = _values_for_threshold(_field, _threshold)
+            # Clip into the (robust) edge range so tail counts land in the
+            # first/last bin instead of being dropped.
+            _values = np.clip(_values, _edges[0], _edges[-1])
             _hist, _ = np.histogram(_values, bins=_edges)
             mplhep.histplot(
                 _hist,
@@ -271,6 +349,8 @@ def _(NBINS, ak, cluster_energy_threshold_selector, data, mplhep, np, plt):
         _ax.set_xlim(_edges[0], _edges[-1])
         _ax.set_xlabel(_xlabel)
         _ax.set_ylabel(_ylabel)
+        if _xscale:
+            _ax.set_xscale(_xscale)
         if _yscale:
             _ax.set_yscale(_yscale)
         _ax.legend(loc="upper right")
@@ -285,7 +365,7 @@ def _(NBINS, ak, cluster_energy_threshold_selector, data, mplhep, np, plt):
 
     _ax = _axs[0]
     for _idx, _threshold in enumerate(_thresholds):
-        _mask = _base_mask & (data.truth.objects.impact_energy > _threshold)
+        _mask = _base_mask & (_threshold_values_field > _threshold)
         _n_objects = ak.to_numpy(ak.sum(_mask, axis=1))
         _n_overflow = int(np.sum(_n_objects >= _overflow_threshold))
         _n_objects_plot = np.clip(_n_objects, _edges[0], np.nextafter(_edges[-1], _edges[0]))
@@ -308,8 +388,8 @@ def _(NBINS, ak, cluster_energy_threshold_selector, data, mplhep, np, plt):
     _ax.set_xlim(_edges[0], _edges[-1])
     mplhep.yscale_legend(soft_fail=True)
 
-    # distribution of number of hits per object
-    _edges = _linear_edges(
+    # distribution of number of hits per object (log x: spans a wide range)
+    _edges = _log_edges(
         _finite_values(data.truth.objects.n_hits),
     )
     _ax = _axs[1]
@@ -319,6 +399,7 @@ def _(NBINS, ak, cluster_energy_threshold_selector, data, mplhep, np, plt):
         _edges,
         "Number of hits per cluster",
         "Number of clusters",
+        _xscale="log",
     )
 
     # distribution of object impact energy, pT, eta, phi (if available in the dataset)
@@ -351,7 +432,7 @@ def _(NBINS, ak, cluster_energy_threshold_selector, data, mplhep, np, plt):
         )
 
         _ax = _axs[4]
-        _edges = _linear_edges(_finite_values(data.truth.objects.impact_eta), _lower=0, _upper=6)
+        _edges = _linear_edges(_finite_values(data.truth.objects.impact_eta), _lower=0, _upper=8)
         _plot_overlaid_hist(
             _ax,
             data.truth.objects.impact_eta,
@@ -382,10 +463,16 @@ def _(NBINS, ak, cluster_energy_threshold_selector, data, mplhep, np, plt):
 
 
 @app.cell(hide_code=True)
-def _(ds, mo):
-    _preprocessing_cluster_energy_threshold = ds.metadata["preprocessing"][
+def _(data, ds, mo):
+    mo.stop(
+        len(data.truth.objects.fields) == 0,
+        mo.md(
+            "This dataset has no truth objects, so SimCluster threshold scans are not available."
+        ),
+    )
+    _preprocessing_cluster_energy_threshold = ds.metadata.get("preprocessing", {}).get(
         "truth_min_object_energy"
-    ]
+    )
     mo.stop(
         _preprocessing_cluster_energy_threshold is not None
         and _preprocessing_cluster_energy_threshold > 0,
@@ -571,7 +658,7 @@ def _(ds, mo):
         label="Hit colour mode",
     )
     event_display_view = mo.ui.multiselect(
-        options={"XY": "xy", "YZ": "yz", "3D": "3d"},
+        options=["xy", "yz", "3d"],
         value=["xy", "yz", "3d"],
         label="Event display views",
     )
@@ -580,7 +667,7 @@ def _(ds, mo):
         start=0.0,
         step=0.1,
         value=0.0,
-        label="SimCluster E threshold [GeV]",
+        label="SimCluster pT threshold [GeV]",
     )
     show_below = mo.ui.checkbox(value=True, label="Show clusters below threshold")
 
@@ -610,35 +697,64 @@ def _(
     event_display_view,
     event_slider,
     mo,
+    np,
     plot_event,
+    plot_event_display,
     show_below,
     show_cluster_markers,
     threshold_input,
 ):
-    event = ds[int(event_slider.value or 0)]
-    hit_object_id = event.truth.hit_object_id
-    n_sig = int((hit_object_id > 0).sum())
-    n_noise = int((hit_object_id == 0).sum())
-
-    fig, summary = plot_event(
-        event,
-        color_by=color_mode.value,
-        views=event_display_view.value,
-        show_cluster_markers=show_cluster_markers.value,
-        energy_threshold=float(threshold_input.value or 0.0),
-        show_clusters_below_threshold=show_below.value,
+    _event = ds[int(event_slider.value or 0)]
+    _hit_object_id = _event.truth.hit_object_id
+    _n_sig = int((_hit_object_id > 0).sum())
+    _n_noise = int((_hit_object_id == 0).sum())
+    _n_unlabeled = int((_hit_object_id == -10).sum())
+    _has_truth_objects = all(
+        _field in _event.truth.objects.fields
+        for _field in ["impact_eta", "impact_phi", "impact_energy", "impact_pt", "track_pdg_id"]
     )
+
+    if _has_truth_objects:
+        _fig, _summary = plot_event(
+            _event,
+            color_by=color_mode.value,
+            views=event_display_view.value,
+            show_cluster_markers=show_cluster_markers.value,
+            energy_threshold=float(threshold_input.value or 0.0),
+            cluster_threshold_field="impact_pt",
+            show_clusters_below_threshold=show_below.value,
+        )
+    else:
+        _empty = np.asarray([], dtype=np.float32)
+        _fig, _summary = plot_event_display(
+            h_x=_event.hits.x,
+            h_y=_event.hits.y,
+            h_z=_event.hits.z,
+            h_e=_event.hits.energy,
+            hit_object_id=_hit_object_id,
+            c_eta=_empty,
+            c_phi=_empty,
+            c_e=_empty,
+            c_pdg=np.asarray([], dtype=np.int32),
+            mode="energy",
+            views=event_display_view.value,
+            show_cluster_markers=False,
+            show_clusters_below_threshold=False,
+            event_idx=_event.event_id,
+        )
+        _summary = "No SimCluster truth is available for this dataset."
 
     mo.vstack(
         [
             mo.md(
-                f"**Event {event.event_id}** | "
-                f"{event.n_hits} hits | "
-                f"{n_sig} signal hits | {n_noise} noise hits | "
-                f"{event.n_objects} SimClusters"
+                f"**Event {_event.event_id}** | "
+                f"{_event.n_hits} hits | "
+                f"{_n_sig} signal hits | {_n_noise} noise hits | "
+                f"{_n_unlabeled} unlabeled hits | "
+                f"{_event.n_objects} SimClusters"
             ),
-            mo.ui.plotly(fig),
-            mo.md(summary),
+            mo.ui.plotly(_fig),
+            mo.md(_summary),
         ]
     )
     return
