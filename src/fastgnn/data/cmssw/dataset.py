@@ -6,7 +6,7 @@ Once converted, data is loaded through fastgnn.data.CaloDataset like every other
 from __future__ import annotations
 
 from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import logging
 from pathlib import Path
 import time
@@ -203,7 +203,7 @@ def convert_cmssw_root(
     _t = time.time()
 
     splits = make_splits(len(records), cfg)
-    normalization = compute_normalization(records, stored_hit_features, splits["train"])
+    normalization = compute_normalization(events, stored_hit_features, splits["train"])
 
     metadata = {
         "format": "fastgnn-canonical-ragged-parquet",
@@ -273,15 +273,22 @@ def _convert_records(
 
     records: list[dict[str, Any]] = []
     worker_args = [(str(path), cfg, hit_features, max_events) for path in input_files]
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        for file_records in tqdm(
-            executor.map(_convert_file_records, worker_args),
-            total=len(worker_args),
-        ):
-            records.extend(file_records)
-            if max_events is not None and len(records) >= max_events:
-                records = records[:max_events]
-                break
+    file_records_by_index: list[list[dict[str, Any]] | None] = [None] * len(worker_args)
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        futures = {
+            executor.submit(_convert_file_records, args): index
+            for index, args in enumerate(worker_args)
+        }
+        for future in tqdm(as_completed(futures), total=len(futures)):
+            file_records_by_index[futures[future]] = future.result()
+
+    for file_records in file_records_by_index:
+        if file_records is None:
+            continue
+        records.extend(file_records)
+        if max_events is not None and len(records) >= max_events:
+            records = records[:max_events]
+            break
 
     for event_id, record in enumerate(records):
         record["event_id"] = event_id

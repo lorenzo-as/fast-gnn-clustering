@@ -707,32 +707,46 @@ def robust_center_scale(values: np.ndarray, axis: int | None = None) -> tuple[An
 
 
 def compute_normalization(
-    records: list[dict[str, Any]],
+    records: Any,
     feature_names: list[str],
     train_indices: np.ndarray,
 ) -> dict[str, Any]:
-    """Compute per-feature mean and standard deviation over selected training events."""
+    """Compute per-feature z-score and robust stats over selected training events."""
     if len(train_indices) == 0:
         train_indices = np.arange(len(records), dtype=np.int64)
-    features = []
+
+    values_by_feature = _normalization_feature_values(records, feature_names, train_indices)
+    normalization = {}
+    for name, values in values_by_feature.items():
+        std = values.std()
+        median, iqr = robust_center_scale(values)
+        normalization[name] = {
+            "mean": float(values.mean()),
+            "std": float(1.0 if std < 1e-8 else std),
+            "median": float(median),
+            "iqr": float(iqr),
+        }
+    return normalization
+
+
+def _normalization_feature_values(
+    records: Any,
+    feature_names: list[str],
+    train_indices: np.ndarray,
+) -> dict[str, np.ndarray]:
+    if isinstance(records, ak.Array):
+        selected = records[train_indices]
+        return {
+            name: ak.to_numpy(ak.flatten(selected["hits", name], axis=None)).astype(np.float32)
+            for name in feature_names
+        }
+
+    values: dict[str, list[np.ndarray]] = {name: [] for name in feature_names}
     for idx in train_indices:
         hits = records[int(idx)]["hits"]
-        features.append(
-            np.stack([_to_numpy(hits[name]) for name in feature_names], axis=1).astype(np.float32)
-        )
-    flat = np.concatenate(features, axis=0)
-    mean = flat.mean(axis=0)
-    std = np.where(flat.std(axis=0) < 1e-8, 1.0, flat.std(axis=0))
-    median, iqr = robust_center_scale(flat, axis=0)
-    return {
-        name: {
-            "mean": float(mean[index]),
-            "std": float(std[index]),
-            "median": float(median[index]),
-            "iqr": float(iqr[index]),
-        }
-        for index, name in enumerate(feature_names)
-    }
+        for name in feature_names:
+            values[name].append(_to_numpy(hits[name]).astype(np.float32))
+    return {name: np.concatenate(parts, axis=0) for name, parts in values.items()}
 
 
 def apply_normalization(

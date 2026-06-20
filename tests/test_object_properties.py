@@ -278,6 +278,13 @@ def test_conversion_metadata_uses_hit_features_and_retains_physical_fields(
 
 
 def test_parallel_conversion_preserves_file_order_and_reassigns_event_ids(monkeypatch) -> None:
+    class FakeFuture:
+        def __init__(self, result):
+            self._result = result
+
+        def result(self):
+            return self._result
+
     class FakeExecutor:
         def __init__(self, max_workers):
             self.max_workers = max_workers
@@ -288,9 +295,9 @@ def test_parallel_conversion_preserves_file_order_and_reassigns_event_ids(monkey
         def __exit__(self, *args):
             return False
 
-        def map(self, fn, args):
+        def submit(self, fn, arg):
             assert self.max_workers == 2
-            return [fn(arg) for arg in args]
+            return FakeFuture(fn(arg))
 
     def fake_convert_file_records(args):
         path, *_ = args
@@ -299,7 +306,11 @@ def test_parallel_conversion_preserves_file_order_and_reassigns_event_ids(monkey
             {"event_id": -1, "hits": {"x": [path]}, "truth": {"objects": {}}},
         ]
 
-    monkeypatch.setattr("fastgnn.data.cmssw.dataset.ThreadPoolExecutor", FakeExecutor)
+    monkeypatch.setattr("fastgnn.data.cmssw.dataset.ProcessPoolExecutor", FakeExecutor)
+    monkeypatch.setattr(
+        "fastgnn.data.cmssw.dataset.as_completed",
+        lambda futures: reversed(list(futures)),
+    )
     monkeypatch.setattr(
         "fastgnn.data.cmssw.dataset._convert_file_records", fake_convert_file_records
     )
