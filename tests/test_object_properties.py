@@ -5,6 +5,7 @@ import yaml
 
 from fastgnn.data.cmssw.dataset import (
     _branches_to_load,
+    _convert_records,
     cmssw_event_to_record,
     convert_cmssw_root,
     iter_cmssw_events,
@@ -23,6 +24,7 @@ from fastgnn.data.cmssw.preprocessing import (
     HIT_Z,
     HIT_ZSIDE,
     build_truth,
+    cmssw_branches,
     cmssw_object_links,
 )
 from fastgnn.data.object_properties import (
@@ -220,8 +222,9 @@ def test_all_fractional_properties_keep_hard_cluster0_oc_labels() -> None:
 
 
 def test_all_fractional_mode_loads_additional_root_association_branches() -> None:
-    default = _branches_to_load({})
-    all_fractional = _branches_to_load({"object_aggregation_mode": "all_fractional"})
+    branches = cmssw_branches("")
+    default = _branches_to_load({}, branches)
+    all_fractional = _branches_to_load({"object_aggregation_mode": "all_fractional"}, branches)
 
     assert HIT_CLUSTERS[1] not in default
     assert HIT_FRACS[1] not in default
@@ -240,6 +243,7 @@ def test_iter_cmssw_events_preprocesses_each_accepted_event_once(monkeypatch) ->
     monkeypatch.setattr(
         "fastgnn.data.cmssw.dataset.uproot.iterate", lambda *args, **kwargs: [chunk]
     )
+    monkeypatch.setattr("fastgnn.data.cmssw.dataset._validate_chain", lambda *a, **k: None)
     monkeypatch.setattr("fastgnn.data.cmssw.dataset.preprocess_vertices", fake_preprocess)
 
     events = list(iter_cmssw_events(["input.root"], max_events=1))
@@ -271,6 +275,39 @@ def test_conversion_metadata_uses_hit_features_and_retains_physical_fields(
     assert "eta_energy_weighted" in metadata["required_fields"]["truth.objects"]
     assert "feature_names" not in metadata
     assert "materialized_hit_features" not in metadata
+
+
+def test_parallel_conversion_preserves_file_order_and_reassigns_event_ids(monkeypatch) -> None:
+    class FakeExecutor:
+        def __init__(self, max_workers):
+            self.max_workers = max_workers
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def map(self, fn, args):
+            assert self.max_workers == 2
+            return [fn(arg) for arg in args]
+
+    def fake_convert_file_records(args):
+        path, *_ = args
+        return [
+            {"event_id": -1, "hits": {"x": [path]}, "truth": {"objects": {}}},
+            {"event_id": -1, "hits": {"x": [path]}, "truth": {"objects": {}}},
+        ]
+
+    monkeypatch.setattr("fastgnn.data.cmssw.dataset.ThreadPoolExecutor", FakeExecutor)
+    monkeypatch.setattr(
+        "fastgnn.data.cmssw.dataset._convert_file_records", fake_convert_file_records
+    )
+
+    records = _convert_records(["b.root", "a.root"], {}, ["x"], max_events=3, num_workers=2)
+
+    assert [record["event_id"] for record in records] == [0, 1, 2]
+    assert [record["hits"]["x"][0] for record in records] == ["b.root", "b.root", "a.root"]
 
 
 def _base_hits() -> dict[str, np.ndarray]:

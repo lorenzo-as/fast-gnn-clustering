@@ -2,7 +2,11 @@ from pathlib import Path
 
 from hydra import compose, initialize_config_dir
 
-from fastgnn.scripts.convert_cmssw import convert_from_config
+from fastgnn.scripts.convert_cmssw import (
+    _compose_config as _compose_convert_config,
+    _resolve_input_files,
+    convert_from_config,
+)
 from fastgnn.scripts.train import (
     _compose_config,
     _load_datasets,
@@ -95,6 +99,42 @@ def test_cmssw_conversion_config_composes() -> None:
     assert cfg.seed == 0
 
 
+def test_cmssw_classical_conversion_config_composes() -> None:
+    cfg = _compose_test_config(
+        "convert/cmssw_classical_inference_only",
+        [
+            "input_files=[data/raw/cmssw_classical/example.root]",
+            "output_dir=data/processed/cmssw_classical/example",
+            "zside=-1",
+        ],
+    )
+
+    assert cfg.input_files == ["data/raw/cmssw_classical/example.root"]
+    assert cfg.output_dir == "data/processed/cmssw_classical/example"
+    assert cfg.tree_path == "l1tHGCalTriggerNtuplizer/HGCalTriggerNtuple"
+    assert cfg.zside == -1
+    assert cfg.store_derived_features is True
+    assert cfg.hit_features == [
+        "x",
+        "y",
+        "z",
+        "r",
+        "eta",
+        "phi",
+        "energy",
+        "et",
+        "layer",
+        "x_over_z",
+        "y_over_z",
+        "log_energy",
+        "log_et",
+        "cos_phi",
+        "sin_phi",
+    ]
+    assert cfg.log_floor == 1.0e-8
+    assert cfg.step_size is None
+
+
 def test_cmssw_conversion_cli_passes_config(monkeypatch) -> None:
     calls = []
 
@@ -114,6 +154,7 @@ def test_cmssw_conversion_cli_passes_config(monkeypatch) -> None:
             "output_dir=data/processed/cmssw/v0/example",
             "max_events=100",
             "overwrite=true",
+            "num_workers=3",
             "zside=-1",
             "hit_features=[x,y,z,energy]",
             "log_floor=1e-6",
@@ -155,8 +196,37 @@ def test_cmssw_conversion_cli_passes_config(monkeypatch) -> None:
             },
             "max_events": 100,
             "overwrite": True,
+            "num_workers": 3,
         }
     ]
+
+
+def test_cmssw_conversion_cli_selects_config_name() -> None:
+    cfg = _compose_convert_config(["--config-name", "convert/cmssw_v4_all_thresholded"])
+
+    assert cfg.input_files == ["data/raw/cmssw/v4/**/*.root"]
+    assert cfg.output_dir.endswith(
+        "data/processed/cmssw/v4/cocktail32_pt5-50-multimerging/default/"
+        "ThresholdRecHits-ClusterTransverseEnergyThreshold_1GeV-HitMinEnergy_0.2GeV"
+    )
+    assert cfg.hit_min_energy == 0.2
+    assert cfg.truth_min_object_energy == 1
+    assert cfg.truth_min_sum_energy == 0
+    assert cfg.num_workers == 1
+
+
+def test_cmssw_conversion_input_globs_resolve_from_project_root(
+    monkeypatch, tmp_path: Path
+) -> None:
+    (tmp_path / "data/raw/cmssw/v4/shard10").mkdir(parents=True)
+    (tmp_path / "data/raw/cmssw/v4/shard2").mkdir(parents=True)
+    shard10 = tmp_path / "data/raw/cmssw/v4/shard10/NANO_shard10.root"
+    shard2 = tmp_path / "data/raw/cmssw/v4/shard2/NANO_shard2.root"
+    shard10.touch()
+    shard2.touch()
+    monkeypatch.setattr("fastgnn.scripts.convert_cmssw.get_project_root", lambda: tmp_path)
+
+    assert _resolve_input_files(["data/raw/cmssw/v4/**/*.root"]) == [shard2, shard10]
 
 
 def test_train_paths_resolve_from_project_root(monkeypatch, tmp_path: Path) -> None:
