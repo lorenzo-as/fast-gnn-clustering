@@ -1,0 +1,15 @@
+# @package _global_
+
+input_files: []
+output_dir: data/processed/cmssw_classical/inference_only
+max_events: null
+overwrite: false
+num_workers: 1
+
+tree_path: l1tHGCalTriggerNtuplizer/HGCalTriggerNtuple
+zside: 1
+store_derived_features: true
+hit_features: [x, y, z, r, eta, phi, energy, et, layer, x_over_z, y_over_z, log_energy, log_et, cos_phi, sin_phi]
+log_floor: 1.0e-8
+step_size: null
+seed: 0
