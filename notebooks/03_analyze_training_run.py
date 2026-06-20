@@ -287,39 +287,10 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(best_model, config, np, test_ds):
-    from fastgnn.training.oc_outputs import OCOutputLayout, split_oc_outputs
+    from fastgnn.evaluation import oc_layout_from_model_config
+    from fastgnn.training.oc_outputs import split_oc_outputs
 
-    def _oc_layout_from_model_config(model_cfg):
-        try:
-            return OCOutputLayout.from_config(model_cfg)
-        except ValueError as exc:
-            if "output_layout.regressions is no longer supported" not in str(exc):
-                raise
-
-        layout_cfg = dict(model_cfg.get("output_layout") or {})
-        regressions = list(layout_cfg.pop("regressions", []) or [])
-        cluster_cfg = dict(layout_cfg.get("cluster_space") or {})
-        cluster_start = int(cluster_cfg.get("start", 1))
-        cluster_dim = int(cluster_cfg["dim"])
-        payload_start = cluster_start + cluster_dim
-        payload_dim = int(model_cfg.get("payload_output_dim") or 0)
-
-        if regressions:
-            regression_starts = [int(reg["start"]) for reg in regressions]
-            regression_stops = [int(reg["start"]) + int(reg["dim"]) for reg in regressions]
-            payload_start = min(regression_starts)
-            payload_dim = max(regression_stops) - payload_start
-        elif payload_dim == 0:
-            payload_dim = int(model_cfg["output_dim"]) - 1 - cluster_dim
-
-        if payload_dim > 0:
-            layout_cfg["payload"] = {"start": payload_start, "dim": payload_dim}
-
-        compat_model_cfg = dict(model_cfg)
-        compat_model_cfg["output_layout"] = layout_cfg
-        return OCOutputLayout.from_config(compat_model_cfg)
-
-    oc_layout = _oc_layout_from_model_config(config["model"])
+    oc_layout = oc_layout_from_model_config(config["model"])
     test_data = test_ds.as_padded(
         max_vertices=config["model"]["max_vertices"],
         feature_names=config["data"]["feature_names"],
@@ -345,9 +316,9 @@ def _(best_model, config, np, test_ds):
 
 @app.cell(hide_code=True)
 def _(config, mo, oc_layout):
-    payload_quantities = list(
-        ((config.get("training") or {}).get("payload") or {}).get("quantities") or []
-    )
+    from fastgnn.evaluation import payload_quantities_from_config
+
+    payload_quantities = payload_quantities_from_config(config)
     has_payload_model = oc_layout.payload_dim > 0 and len(payload_quantities) > 0
     if has_payload_model:
         _payload_lines = [
@@ -402,14 +373,12 @@ def _(regression_primary_selector, regression_secondary_selector):
 
 @app.cell(hide_code=True)
 def _(config, np, payload_quantities, test_data, test_ds):
+    from fastgnn.evaluation import prediction_eval_feature_names
+
     # Payload *corrections* are decoded from each hit's own raw (unnormalized) seed
     # feature (e.g. ``et``, ``eta``, ``phi``), so the eval payload must carry those
     # columns in addition to the physical x/y/z/energy used for matching and reco.
-    eval_feature_names = ["x", "y", "z", "energy"]
-    for _quantity in payload_quantities:
-        _seed = _quantity.get("seed")
-        if _seed is not None and str(_seed) not in eval_feature_names:
-            eval_feature_names.append(str(_seed))
+    eval_feature_names = prediction_eval_feature_names(payload_quantities)
     test_eval_data = test_ds.as_padded(
         max_vertices=config["model"]["max_vertices"],
         feature_names=eval_feature_names,
