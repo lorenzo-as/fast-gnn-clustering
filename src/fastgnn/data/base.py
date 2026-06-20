@@ -36,6 +36,7 @@ Split = Literal["train", "val", "test"]
 BATCH_KEYS = ["features", "hit_object_id"]
 PADDING_OBJECT_ID = -1
 NOISE_OBJECT_ID = 0
+EMPTY_OBJECTS_SENTINEL_FIELD = "_empty"
 
 
 def _read_yaml(path: Path) -> dict:
@@ -43,6 +44,19 @@ def _read_yaml(path: Path) -> dict:
         return {}
     with path.open() as f:
         return yaml.safe_load(f) or {}
+
+
+def write_yaml(path: Path, data: dict[str, Any]) -> None:
+    """Write a small YAML sidecar with stable key order."""
+    with path.open("w") as f:
+        yaml.safe_dump(data, f, sort_keys=False)
+
+
+def record_field_names(record: Any) -> list[str]:
+    """Return field names for either an Awkward record or a plain mapping."""
+    if hasattr(record, "fields"):
+        return list(record.fields)
+    return list(record.keys())
 
 
 def _read_splits(dataset_dir: Path) -> dict[str, np.ndarray]:
@@ -67,6 +81,8 @@ def _field_group_from_record(record: Any) -> FieldGroup:
     """Recursively convert an Awkward record into nested FieldGroup objects."""
     data = {}
     for name in record.fields:
+        if name == EMPTY_OBJECTS_SENTINEL_FIELD:
+            continue
         value = record[name]
         if hasattr(value, "fields") and value.fields:
             data[name] = _field_group_from_record(value)
@@ -248,7 +264,13 @@ class CaloDataset:
         return {
             "hits": list(first["hits"].fields),
             "truth": list(truth.fields),
-            "truth.objects": list(truth["objects"].fields) if "objects" in truth.fields else [],
+            "truth.objects": [
+                field
+                for field in list(truth["objects"].fields)
+                if field != EMPTY_OBJECTS_SENTINEL_FIELD
+            ]
+            if "objects" in truth.fields
+            else [],
             "metadata": list(first["metadata"].fields) if "metadata" in first.fields else [],
         }
 

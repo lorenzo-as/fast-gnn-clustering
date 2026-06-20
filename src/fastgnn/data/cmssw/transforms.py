@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 
-from fastgnn.data.cmssw.preprocessing import HIT_ENERGY, HIT_PREFIX
+from fastgnn.data.cmssw.preprocessing import cmssw_branches_from_cfg
 
 
 def preprocess_vertices(raw_event: dict[str, np.ndarray], cfg: dict[str, Any]) -> dict[str, np.ndarray]:
@@ -29,11 +29,12 @@ def preprocess_rechits_energy_threshold(
     if min_energy is None:
         return raw_event
 
-    keep = raw_event[HIT_ENERGY] >= float(min_energy)
+    branches = cmssw_branches_from_cfg(cfg)
+    keep = raw_event[branches.energy] >= float(min_energy)
     filtered = {}
-    n_hits = len(raw_event[HIT_ENERGY])
+    n_hits = len(raw_event[branches.energy])
     for field, values in raw_event.items():
-        if len(values) == n_hits and field.startswith(HIT_PREFIX):
+        if len(values) == n_hits and field.startswith(branches.hit_prefix):
             filtered[field] = values[keep]
         else:
             filtered[field] = values
