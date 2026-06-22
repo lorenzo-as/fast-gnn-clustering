@@ -52,7 +52,7 @@ notebooks = [
 ]
 
 [tool.uv.sources]
-quantized-gravnet = {git = "https://github.com/lorenzo-as/quantized-gravnet", tag = "v0.1.0"}
+quantized-gravnet = {git = "https://github.com/lorenzo-as/quantized-gravnet", branch = "dev"}
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fastgnn"]
