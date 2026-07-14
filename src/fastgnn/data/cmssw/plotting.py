@@ -113,8 +113,7 @@ def plot_event(
     """
     Plot one canonical CMSSW event.
 
-    This is the notebook-facing API: pass an EventRecord, not storage-specific
-    HDF5/Parquet internals.
+    This is the notebook-facing API: pass an EventRecord.
     """
     event.hits.require("x", "y", "z", "energy")
     event.truth.require("hit_object_id", "objects")
@@ -497,9 +496,10 @@ def _add_energy_traces(
         ),
     )
 
-    hover = "x=%{x:.2f}<br>y=%{y:.2f}<br>E=%{marker.color:.4f} GeV<extra>RecHit</extra>"
+    h_e_arr = np.asarray(h_e)
+    hover = "x=%{x:.2f}<br>y=%{y:.2f}<br>E=%{customdata:.4f} GeV<extra>RecHit</extra>"
     hover3d = (
-        "x=%{x:.2f}<br>y=%{y:.2f}<br>z=%{z:.2f}<br>E=%{marker.color:.4f} GeV<extra>RecHit</extra>"
+        "x=%{x:.2f}<br>y=%{y:.2f}<br>z=%{z:.2f}<br>E=%{customdata:.4f} GeV<extra>RecHit</extra>"
     )
 
     if "xy" in views:
@@ -511,6 +511,7 @@ def _add_energy_traces(
                 marker=marker_2d,
                 name="RecHits",
                 legendgroup="rechits",
+                customdata=h_e_arr,
                 hovertemplate=hover,
             ),
             row=1,
@@ -527,7 +528,8 @@ def _add_energy_traces(
                 name="RecHits",
                 legendgroup="rechits",
                 showlegend="xy" not in views,
-                hovertemplate="y=%{x:.2f}<br>z=%{y:.2f}<br>E=%{marker.color:.4f} GeV<extra>RecHit</extra>",
+                customdata=h_e_arr,
+                hovertemplate="y=%{x:.2f}<br>z=%{y:.2f}<br>E=%{customdata:.4f} GeV<extra>RecHit</extra>",
             ),
             row=1,
             col=_view_col(views, "yz"),
@@ -544,6 +546,7 @@ def _add_energy_traces(
                 name="RecHits",
                 legendgroup="rechits",
                 showlegend=("xy" not in views and "yz" not in views),
+                customdata=h_e_arr,
                 hovertemplate=hover3d,
             ),
             row=1,

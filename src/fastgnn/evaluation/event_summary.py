@@ -15,6 +15,7 @@ from typing import Any
 
 import numpy as np
 
+from fastgnn.evaluation._common import delta_phi
 from fastgnn.geometry import xyz_to_eta_phi
 
 PAYLOAD_SOURCE = "payl."
@@ -87,6 +88,24 @@ def pred_et_from_row(row: dict[str, Any], prediction_source: str) -> float | Non
 def pred_energy_from_row(row: dict[str, Any], prediction_source: str) -> float | None:
     key = "payload_energy_pred" if prediction_source == PAYLOAD_SOURCE else "energy_pred"
     return row.get(key)
+
+
+def _nearest_truth_dist_for_pred(
+    pred_row: dict[str, Any], truth_rows: list[dict[str, Any]]
+) -> float | None:
+    pred_eta = pred_row.get("centroid_eta_reco")
+    pred_phi = pred_row.get("centroid_phi_reco")
+    if pred_eta is None or pred_phi is None:
+        return None
+
+    distances = []
+    for truth_row in truth_rows:
+        truth_eta = truth_row.get("truth_centroid_eta")
+        truth_phi = truth_row.get("truth_centroid_phi")
+        dphi = delta_phi(pred_phi, truth_phi)
+        if truth_eta is not None and truth_phi is not None and dphi is not None:
+            distances.append(float(np.hypot(float(pred_eta) - float(truth_eta), dphi)))
+    return min(distances) if distances else None
 
 
 def event_energy_accounting(
@@ -218,6 +237,7 @@ def event_truth_match_summary(
                 "truth_ref_energy": truth_ref_energy,
                 "truth_sum_energy": truth_sum_energy,
                 "truth_et": truth_et,
+                "impact_pt": truth_row.get("truth_pt"),
                 "n_hits_truth": truth_row.get("n_hits_truth"),
                 "nearest_truth_dist": truth_row.get("nearest_truth_dist"),
                 "beta_max": truth_row.get("beta_max"),
@@ -246,6 +266,7 @@ def event_fake_cluster_rows(
 ) -> list[dict[str, Any]]:
     if oc_eval is None:
         return []
+    truth_rows = event_table_rows(oc_eval.truth, event_idx)
     pred_rows = event_table_rows(oc_eval.predicted, event_idx)
     fake_rows = [
         row
@@ -266,6 +287,7 @@ def event_fake_cluster_rows(
             "matched": False,
             "truth_energy": None,
             "energy_pred": pred_energy_from_row(row, prediction_source),
+            "impact_pt": None,
             "truth_et": None,
             "et_pred": pred_et_from_row(row, prediction_source),
             "recovered_et": None,
@@ -275,8 +297,8 @@ def event_fake_cluster_rows(
             "completeness": None,
             "et_recovered_fraction": None,
             "et_assigned_fraction": None,
-            "beta_max": None,
-            "nearest_truth_dist": None,
+            "beta_max": row.get("beta_seed"),
+            "nearest_truth_dist": _nearest_truth_dist_for_pred(row, truth_rows),
         }
         for row in fake_rows
     ]

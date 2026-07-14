@@ -9,6 +9,7 @@ from fastgnn.evaluation import (
     evaluate_oc_padded,
     grid_search_thresholds,
 )
+from fastgnn.evaluation.event_summary import event_fake_cluster_rows
 from fastgnn.evaluation.matching import matched_positions as _matched_positions
 from fastgnn.training.oc_outputs import OCOutputLayout, split_oc_outputs
 
@@ -258,6 +259,15 @@ def test_oc_evaluation_seed_matching_by_xyz_distance_and_binned_rates() -> None:
     np.testing.assert_allclose(predicted["centroid_x_reco"].to_list()[0], expected_pred1_xyz[0])
     assert "centroid_x_reco" in predicted.columns
     assert "sum_x_reco" not in predicted.columns
+
+    fake_rows = event_fake_cluster_rows(evaluation, 0, prediction_source="aggr.")
+    assert len(fake_rows) == 2
+    np.testing.assert_allclose(
+        [row["beta_max"] for row in fake_rows],
+        [0.80, 0.75],
+        rtol=1e-12,
+    )
+    assert all(row["nearest_truth_dist"] is not None for row in fake_rows)
 
     efficiency = binned_efficiency(evaluation.truth, "truth_energy", np.array([0.0, 5.0, 20.0]))
     fake_rate = binned_fake_rate(evaluation.predicted, "energy_pred", np.array([0.0, 2.0, 20.0]))
