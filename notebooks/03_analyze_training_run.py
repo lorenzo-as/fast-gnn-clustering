@@ -113,7 +113,7 @@ def _(OUTPUT_DIR, Path, mo, runs_table):
     return (model_file_selector,)
 
 
-@app.cell(hide_code=True)
+@app.cell
 def _(
     CaloDataset,
     OUTPUT_DIR,
@@ -148,7 +148,9 @@ def _(
     )
     selected_run = Path(runs_table.value["path"][0])
     selected_run_dir = OUTPUT_DIR / selected_run
-    best_model, history, config = load_run(selected_run_dir, model_file=model_file_selector.value)
+    best_model, history, config = load_run(
+        selected_run_dir, model_file=Path(model_file_selector.value).with_suffix(".keras")
+    )
     test_ds = CaloDataset(PRJ_ROOT / config["data"]["dataset_dir"], split="test")
     messages = [
         f"Loaded {'model, ' if best_model is not None else ''}history, and config for run: `{selected_run}`",
@@ -400,17 +402,17 @@ def _(mo):
 
 
 @app.cell(disabled=True, hide_code=True)
-def _(CaloDataset, PRJ_ROOT, config, mo, test_beta, test_data):
-    full_data = CaloDataset(PRJ_ROOT / config["data"]["dataset_dir"], split=None).as_padded(
-        max_vertices=config["model"]["max_vertices"],
-        feature_names=config["data"]["feature_names"],
-        truncate=config["training"].get("truncate", "first"),
-        normalize_features=config["training"].get("normalize_features", True),
-        seed=config.get("seed", 0),
-    )
-    full_data_padded_mask = ~full_data["mask"].astype(bool)
-    full_data_signal_mask = (full_data["hit_object_id"] > 0) & ~full_data_padded_mask
-    full_data_noise_mask = (full_data["hit_object_id"] == 0) & ~full_data_padded_mask
+def _(mo, test_beta, test_data):
+    # full_data = CaloDataset(PRJ_ROOT / config["data"]["dataset_dir"], split=None).as_padded(
+    #     max_vertices=config["model"]["max_vertices"],
+    #     feature_names=config["data"]["feature_names"],
+    #     truncate=config["training"].get("truncate", "first"),
+    #     normalize_features=config["training"].get("normalize_features", True),
+    #     seed=config.get("seed", 0),
+    # )
+    # full_data_padded_mask = ~full_data["mask"].astype(bool)
+    # full_data_signal_mask = (full_data["hit_object_id"] > 0) & ~full_data_padded_mask
+    # full_data_noise_mask = (full_data["hit_object_id"] == 0) & ~full_data_padded_mask
 
     test_data_beta_min, test_data_beta_max = test_beta.min(), test_beta.max()
     test_data_beta_min = 0 if test_data_beta_min > 0 else test_data_beta_min
@@ -423,9 +425,6 @@ def _(CaloDataset, PRJ_ROOT, config, mo, test_beta, test_data):
     )
     yscale_selector_01
     return (
-        full_data_noise_mask,
-        full_data_padded_mask,
-        full_data_signal_mask,
         test_data_beta_max,
         test_data_beta_min,
         test_data_noise_mask,
@@ -439,10 +438,6 @@ def _(CaloDataset, PRJ_ROOT, config, mo, test_beta, test_data):
 def _(
     COLORS,
     PLOTTING_CONFIG,
-    config,
-    full_data_noise_mask,
-    full_data_padded_mask,
-    full_data_signal_mask,
     mplhep,
     np,
     plt,
@@ -458,35 +453,35 @@ def _(
         nrows=1, ncols=2, figsize=PLOTTING_CONFIG["figsize"]["A4"]["fullwidth_2pane"]
     )
 
-    plt.sca(_axs[0])
+    # plt.sca(_axs[0])
 
-    _bins_truth = np.linspace(0, 100, 50)
-    for _mask, _label in reversed(
-        list(
-            zip(
-                [full_data_signal_mask, full_data_noise_mask, full_data_padded_mask],
-                ["Signal  ", "Noise   ", "Padding"],
-            )
-        )
-    ):
-        _fractions = _mask.sum(axis=1) / config["model"]["max_vertices"] * 100
-        plt.hist(
-            _fractions,
-            bins=_bins_truth,
-            alpha=0.5,
-            label=_label + f" (mean: {_fractions.mean():.1f}%)",
-            color=COLORS[_label.strip().lower()],
-        )
-    plt.xlabel("Fraction of vertices per event [%]")
-    plt.xlim(0, 100)
-    plt.ylabel("Count")
-    plt.yscale(yscale_selector_01.value)
-    if yscale_selector_01.value == "linear":
-        plt.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
-    mplhep.add_text(f"Full Dataset (N={len(full_data_signal_mask)})", loc="over right")
-    plt.legend()
-    mplhep.mpl_magic()
-    plt.ylim(1, None)
+    # _bins_truth = np.linspace(0, 100, 50)
+    # for _mask, _label in reversed(
+    #     list(
+    #         zip(
+    #             [full_data_signal_mask, full_data_noise_mask, full_data_padded_mask],
+    #             ["Signal  ", "Noise   ", "Padding"],
+    #         )
+    #     )
+    # ):
+    #     _fractions = _mask.sum(axis=1) / config["model"]["max_vertices"] * 100
+    #     plt.hist(
+    #         _fractions,
+    #         bins=_bins_truth,
+    #         alpha=0.5,
+    #         label=_label + f" (mean: {_fractions.mean():.1f}%)",
+    #         color=COLORS[_label.strip().lower()],
+    #     )
+    # plt.xlabel("Fraction of vertices per event [%]")
+    # plt.xlim(0, 100)
+    # plt.ylabel("Count")
+    # plt.yscale(yscale_selector_01.value)
+    # if yscale_selector_01.value == "linear":
+    #     plt.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
+    # mplhep.add_text(f"Full Dataset (N={len(full_data_signal_mask)})", loc="over right")
+    # plt.legend()
+    # mplhep.mpl_magic()
+    # plt.ylim(1, None)
 
     # Histogram of beta values for signal hits and noise hits
     plt.sca(_axs[1])
@@ -628,6 +623,10 @@ def _(has_payload_model, mo):
     hungarian_energy_ratio_log_weight_selector = mo.ui.number(
         label="Hungarian Energy Ratio Log Weight", value=0.0, step=0.1
     )
+    run_refined_threshold_scan = mo.ui.checkbox(
+        label="Run refined pass around coarse optimum",
+        value=False,
+    )
     start_calibration_button = mo.ui.run_button(
         label="Start threshold calibration",
         kind="success",
@@ -652,6 +651,7 @@ def _(has_payload_model, mo):
             ),
             threshold_objective_selector,
             mo.hstack(_matching_controls),
+            run_refined_threshold_scan,
             start_calibration_button,
         ]
     )
@@ -662,6 +662,7 @@ def _(has_payload_model, mo):
         matching_energy_ratio_max_selector,
         matching_energy_ratio_min_selector,
         payload_matching_distance_threshold_selector,
+        run_refined_threshold_scan,
         start_calibration_button,
         threshold_objective_selector,
     )
@@ -680,6 +681,7 @@ def _(
     mo,
     np,
     pl,
+    run_refined_threshold_scan,
     selected_run_dir,
     start_calibration_button,
     threshold_objective_selector,
@@ -729,12 +731,14 @@ def _(
         "tbeta_values": _float_list(_tbeta_values),
         "td_values": _float_list(_td_values),
         "feature_names": ["x", "y", "z", "energy"],
-        "refinement": {
+        "run_refined_pass": bool(run_refined_threshold_scan.value),
+    }
+    if run_refined_threshold_scan.value:
+        _calibration_options["refinement"] = {
             "n_values": _REFINE_N,
             "low_factor": _REFINE_LOW,
             "high_factor": _REFINE_HIGH,
-        },
-    }
+        }
 
     if threshold_objective_selector.value == "matched_f1":
         _calibration_options["matching"] = {
@@ -791,31 +795,36 @@ def _(
             subtitle=_progress_subtitle,
         )
 
-        # Pass 2: refined scan — 50 values in [0.75x, 1.25x] around each coarse best
-        _best_tbeta = _coarse_best["tbeta"]
-        _best_td = _coarse_best["td"]
+        if run_refined_threshold_scan.value:
+            # Pass 2: refined scan around the coarse best
+            _best_tbeta = _coarse_best["tbeta"]
+            _best_td = _coarse_best["td"]
 
-        _fine_tbeta_values = np.linspace(
-            max(_REFINE_LOW * _best_tbeta, 1e-4),
-            min(_REFINE_HIGH * _best_tbeta, 1.0),
-            _REFINE_N,
-        )
-        _fine_td_values = np.linspace(
-            max(_REFINE_LOW * _best_td, 1e-4),
-            _REFINE_HIGH * _best_td,
-            _REFINE_N,
-        )
-        _fine_subtitle = (
-            f"{_REFINE_N} beta thresholds x {_REFINE_N} distance thresholds "
-            f"(refined around tbeta={_best_tbeta:.4f}, td={_best_td:.4f})"
-        )
+            _fine_tbeta_values = np.linspace(
+                max(_REFINE_LOW * _best_tbeta, 1e-4),
+                min(_REFINE_HIGH * _best_tbeta, 1.0),
+                _REFINE_N,
+            )
+            _fine_td_values = np.linspace(
+                max(_REFINE_LOW * _best_td, 1e-4),
+                _REFINE_HIGH * _best_td,
+                _REFINE_N,
+            )
+            _fine_subtitle = (
+                f"{_REFINE_N} beta thresholds x {_REFINE_N} distance thresholds "
+                f"(refined around tbeta={_best_tbeta:.4f}, td={_best_td:.4f})"
+            )
 
-        best_oc_thresholds, _grid_results = _run_grid_search(
-            _fine_tbeta_values,
-            _fine_td_values,
-            title="Refining OC thresholds",
-            subtitle=_fine_subtitle,
-        )
+            best_oc_thresholds, _grid_results = _run_grid_search(
+                _fine_tbeta_values,
+                _fine_td_values,
+                title="Refining OC thresholds",
+                subtitle=_fine_subtitle,
+            )
+            _status = "Computed threshold calibration (coarse + refined) and wrote cache."
+        else:
+            best_oc_thresholds = _coarse_best
+            _status = "Computed threshold calibration (coarse only) and wrote cache."
 
         _record = {
             "calibration_options": _calibration_options,
@@ -827,7 +836,6 @@ def _(
         }
         _cache["records"].append(_record)
         _write_cache(_cache_path, _cache)
-        _status = "Computed threshold calibration (coarse + refined) and wrote cache."
     else:
         best_oc_thresholds = _cached_record["best_thresholds"]
         _status = "Loaded threshold calibration from cache."
@@ -843,8 +851,68 @@ def _(
 
 
 @app.cell(hide_code=True)
+def _(best_oc_thresholds, mo):
+    override_oc_thresholds = mo.ui.checkbox(
+        label="Override calibrated thresholds for downstream analysis",
+        value=False,
+    )
+    tbeta_override = mo.ui.number(
+        label=r"Override $t_\beta$",
+        value=float(best_oc_thresholds["tbeta"]),
+        step=0.001,
+    )
+    td_override = mo.ui.number(
+        label=r"Override $t_d$",
+        value=float(best_oc_thresholds["td"]),
+        step=0.001,
+    )
+    mo.vstack(
+        [
+            override_oc_thresholds,
+            mo.hstack([tbeta_override, td_override]),
+        ]
+    )
+    return override_oc_thresholds, tbeta_override, td_override
+
+
+@app.cell
 def _(
     best_oc_thresholds,
+    mo,
+    override_oc_thresholds,
+    tbeta_override,
+    td_override,
+):
+    active_oc_thresholds = (
+        {
+            "tbeta": float(tbeta_override.value),
+            "td": float(td_override.value),
+            "source": "manual override",
+        }
+        if override_oc_thresholds.value
+        else {
+            "tbeta": float(best_oc_thresholds["tbeta"]),
+            "td": float(best_oc_thresholds["td"]),
+            "source": "calibrated",
+        }
+    )
+
+    mo.vstack(
+        [
+            mo.md("**Thresholds used below**"),
+            mo.md(
+                f"Using `{active_oc_thresholds['source']}` thresholds: "
+                f"`t_beta={active_oc_thresholds['tbeta']:.4f}`, "
+                f"`t_d={active_oc_thresholds['td']:.4f}`"
+            ),
+        ]
+    )
+    return (active_oc_thresholds,)
+
+
+@app.cell(hide_code=True)
+def _(
+    active_oc_thresholds,
     eval_feature_names,
     evaluate_oc_padded,
     has_payload_model,
@@ -866,7 +934,7 @@ def _(
     test_eval_data,
     test_preds,
 ):
-    _tbeta, _td = best_oc_thresholds["tbeta"], best_oc_thresholds["td"]
+    _tbeta, _td = active_oc_thresholds["tbeta"], active_oc_thresholds["td"]
     _events = [test_ds[i] for i in range(len(test_ds))]
 
     def _evaluate_with_reference(reference, max_match_distance):
@@ -1273,12 +1341,14 @@ def _(
         _upper_lim = float(_bins[-1])
         _overflow = ((_values < _lower_lim) | (_values > _upper_lim)).sum() / len(_values)
         _txt = f"{_source['label']}\n$\\mu$={_values.mean():.2f}\noverflow: {_overflow:.1%}"
+        _annotation_x = 0.97 if not show_relative_residual.value else 0.05
+        _annotation_ha = "right" if not show_relative_residual.value else "left"
         _ax.text(
-            0.05,
-            0.90 - 0.16 * _i,
+            _annotation_x,
+            0.84 - 0.18 * _i,
             _txt,
             transform=_ax.transAxes,
-            ha="left",
+            ha=_annotation_ha,
             va="top",
             fontsize="small",
             color=_source["color"],
@@ -1614,7 +1684,7 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(
     REFERENCE_LINE_KWARGS,
-    best_oc_thresholds,
+    active_oc_thresholds,
     count_pred_objects,
     count_truth_objects,
     mplhep,
@@ -1626,7 +1696,7 @@ def _(
 ):
     mplhep.style.use("CMS")
 
-    _tbeta, _td = best_oc_thresholds["tbeta"], best_oc_thresholds["td"]
+    _tbeta, _td = active_oc_thresholds["tbeta"], active_oc_thresholds["td"]
 
     _n_truth_test = count_truth_objects(
         test_data["hit_object_id"], mask=test_data.get("mask", None)
@@ -1902,30 +1972,6 @@ def _(
                     None,
                 ],
                 [
-                    {"type": "xy", "colspan": 2},
-                    None,
-                    {"type": "xy", "colspan": 2},
-                    None,
-                    {"type": "xy", "colspan": 2},
-                    None,
-                ],
-                [
-                    {"type": "xy", "colspan": 2},
-                    None,
-                    {"type": "xy", "colspan": 2},
-                    None,
-                    {"type": "xy", "colspan": 2},
-                    None,
-                ],
-                [
-                    {"type": "xy", "colspan": 2},
-                    None,
-                    {"type": "xy", "colspan": 2},
-                    None,
-                    {"type": "xy", "colspan": 2},
-                    None,
-                ],
-                [
                     {"type": "table", "colspan": 6},
                     None,
                     None,
@@ -1933,10 +1979,35 @@ def _(
                     None,
                     None,
                 ],
+                [
+                    {"type": "xy", "colspan": 2},
+                    None,
+                    {"type": "xy", "colspan": 2},
+                    None,
+                    {"type": "xy", "colspan": 2},
+                    None,
+                ],
+                [
+                    {"type": "xy", "colspan": 2},
+                    None,
+                    {"type": "xy", "colspan": 2},
+                    None,
+                    {"type": "xy", "colspan": 2},
+                    None,
+                ],
+                [
+                    {"type": "xy", "colspan": 2},
+                    None,
+                    {"type": "xy", "colspan": 2},
+                    None,
+                    {"type": "xy", "colspan": 2},
+                    None,
+                ],
             ],
             subplot_titles=(
                 f"Truth assignment in OC space ({_projection_label})",
                 f"Predicted clusters in OC space ({_projection_label})",
+                "Truth object match summary",
                 "Event beta distribution",
                 "Truth cluster sizes",
                 "Predicted OC seed sizes",
@@ -1946,10 +2017,9 @@ def _(
                 "Event ET accounting",
                 "Purity",
                 "Completeness",
-                "Truth object match summary",
             ),
-            row_heights=[0.44, 0.16, 0.13, 0.13, 0.14],
-            vertical_spacing=0.065,
+            row_heights=[0.38, 0.22, 0.12, 0.12, 0.16],
+            vertical_spacing=0.05,
             horizontal_spacing=0.06,
         )
 
@@ -2091,7 +2161,7 @@ def _(
                     marker_color="rgba(150,150,150,0.65)",
                     opacity=0.65,
                 ),
-                row=2,
+                row=3,
                 col=1,
             )
         if signal.any():
@@ -2107,7 +2177,7 @@ def _(
                     marker_color="#1f77b4",
                     opacity=0.65,
                 ),
-                row=2,
+                row=3,
                 col=1,
             )
         _fig.add_shape(
@@ -2135,7 +2205,7 @@ def _(
                     showlegend=False,
                     hovertemplate="truth object=%{x}<br>valid hits=%{y}<extra></extra>",
                 ),
-                row=2,
+                row=3,
                 col=3,
             )
         _summary_order = [int(label) for label in _truth_labels]
@@ -2188,7 +2258,7 @@ def _(
                     showlegend=False,
                     hovertemplate="seed hit index=%{x}<br>assigned hits=%{y}<extra></extra>",
                 ),
-                row=2,
+                row=3,
                 col=5,
             )
 
@@ -2232,14 +2302,14 @@ def _(
                         "truth object=%{x}<br>ET_pred / ET_true=%{y:.3g}<extra></extra>"
                     ),
                 ),
-                row=3,
+                row=4,
                 col=1,
             )
 
-        _add_truth_metric_bar("et_recovered_fraction", "Truth ET recovered", 3, 3)
-        _add_truth_metric_bar("et_assigned_fraction", "Pred ET purity", 3, 5)
-        _add_truth_metric_bar("purity", "Purity", 4, 3)
-        _add_truth_metric_bar("completeness", "Completeness", 4, 5)
+        _add_truth_metric_bar("et_recovered_fraction", "Truth ET recovered", 4, 3)
+        _add_truth_metric_bar("et_assigned_fraction", "Pred ET purity", 4, 5)
+        _add_truth_metric_bar("purity", "Purity", 5, 3)
+        _add_truth_metric_bar("completeness", "Completeness", 5, 5)
 
         _fig.add_trace(
             go.Bar(
@@ -2284,18 +2354,47 @@ def _(
                     "<extra></extra>"
                 ),
             ),
-            row=4,
+            row=5,
             col=1,
         )
 
+        _truth_entries = truth_object_legend_entries(event, signal_ids, _truth_colors, top_n=10)
+        _truth_legend_map = {
+            int(label.split()[-1]): (color, description)
+            for color, label, description in _truth_entries
+        }
+        _fake_legend_map = {
+            f"fakecluster seed {int(seed_index)}": (
+                _fake_seed_colors[int(seed_index)],
+                "None",
+            )
+            for seed_index in _fake_seed_indices
+        }
+        _table_rows = []
+        for _row in _match_table_rows:
+            _table_row = dict(_row)
+            _object_key = _table_row.get("object_id")
+            if isinstance(_object_key, (int, np.integer)) and int(_object_key) in _truth_legend_map:
+                _legend_color, _legend_label = _truth_legend_map[int(_object_key)]
+            elif _object_key in _fake_legend_map:
+                _legend_color, _legend_label = _fake_legend_map[_object_key]
+            else:
+                _legend_color, _legend_label = "#ffffff", str(_object_key)
+            _table_row["legend_swatch"] = ""
+            _table_row["legend_label"] = _legend_label
+            _table_row["legend_color"] = _legend_color
+            _table_rows.append(_table_row)
+
         _table_columns = [
+            ("legend_swatch", ""),
+            ("legend_label", "legend"),
             ("object_id", "object / fake cluster"),
             ("matched", "matched"),
             ("truth_energy", "E_true hits [GeV]"),
             ("energy_pred", "E_pred [GeV]"),
+            ("impact_pt", "impact pT [GeV]"),
             ("truth_et", "ET_true hits [GeV]"),
             ("et_pred", "ET_pred [GeV]"),
-            ("recovered_energy", "E_recovered [GeV]"),
             ("recovered_et", "ET_recovered [GeV]"),
             ("n_hits_truth", "n_hits true"),
             ("n_hits_pred", "n_hits pred"),
@@ -2316,87 +2415,42 @@ def _(
                 },
                 cells={
                     "values": [
-                        [format_match_table_value(row.get(key)) for row in _match_table_rows]
+                        (
+                            ["" for _ in _table_rows]
+                            if key == "legend_swatch"
+                            else [format_match_table_value(row.get(key)) for row in _table_rows]
+                        )
                         for key, _ in _table_columns
                     ],
                     "align": "left",
-                    "height": 24,
-                    "font": {"size": 10},
+                    "height": 28,
+                    "font": {
+                        "size": 11,
+                        "color": [
+                            ["rgba(0,0,0,0)" for _ in _table_rows]
+                            if key == "legend_swatch"
+                            else ["#111111" for _ in _table_rows]
+                            for key, _ in _table_columns
+                        ],
+                    },
+                    "fill_color": [
+                        [row.get("legend_color", "#ffffff") for row in _table_rows]
+                        if key == "legend_swatch"
+                        else ["white" for _ in _table_rows]
+                        for key, _ in _table_columns
+                    ],
                 },
             ),
-            row=5,
+            row=2,
             col=1,
         )
 
-        _truth_entries = truth_object_legend_entries(event, signal_ids, _truth_colors, top_n=10)
-        _truth_entries = [
-            (
-                color,
-                label,
-                add_seed_arrow_to_truth_description(
-                    description, _truth_to_seed.get(int(label.split()[-1]))
-                ),
-            )
-            for color, label, description in _truth_entries
-        ]
-        _matched_entries = [
-            (
-                _truth_colors[truth_id],
-                f"seed hit {seed_index} → object {truth_id}",
-            )
-            for seed_index, truth_id in sorted(_seed_to_truth.items())
-            if truth_id in _truth_colors
-        ]
-        _fake_entries = [
-            (
-                _fake_seed_colors[int(seed_index)],
-                f"fake seed hit {int(seed_index)}",
-            )
-            for seed_index in _fake_seed_indices
-        ]
-        _truth_text = "<b>Truth clusters:</b><br>" + "<br>".join(
-            f"<span style='color:{color}'>●</span> {description}"
-            for color, _, description in _truth_entries
-        )
-        if noise.any():
-            _truth_text += (
-                ("<br>" if _truth_entries else "")
-                + f"<span style='color:rgba(150,150,150,0.75)'>●</span> noise ({int(noise.sum())} hits)"
-            )
-        _pred_text = "<b>Predicted clusters:</b><br>" + "<br>".join(
-            f"<span style='color:{color}'>●</span> {label}"
-            for color, label in _matched_entries + _fake_entries
-        )
-        if _unassigned.any():
-            _pred_text += (
-                ("<br>" if (_matched_entries or _fake_entries) else "")
-                + f"<span style='color:rgb(190,170,135)'>●</span> unassigned ({int(_unassigned.sum())} hits)"
-            )
-        if not _truth_entries:
-            _truth_text += ("<br>" if noise.any() else "") + "No signal truth clusters"
-        if not (_matched_entries or _fake_entries or _unassigned.any()):
-            _pred_text += "No predicted clusters"
-
-        for _x, _text in [(0.49, _truth_text), (0.985, _pred_text)]:
-            _fig.add_annotation(
-                x=_x,
-                y=0.92,
-                xref="paper",
-                yref="paper",
-                text=_text,
-                showarrow=False,
-                xanchor="right",
-                yanchor="top",
-                align="left",
-                font={"size": 11},
-                bordercolor="#d9d9d9",
-                borderwidth=1,
-                borderpad=8,
-                bgcolor="rgba(255,255,255,0.95)",
-            )
-
         _display_event_id = getattr(event, "event_id", event_idx)
-        _camera = {"eye": {"x": -1 / zoom * 2.35, "y": -1 / zoom * 2.35, "z": 1 / zoom * 2.0}}
+        _camera = (
+            {"eye": {"x": 0.15, "y": 0.15, "z": 1 / zoom * 2.9}}
+            if projection_mode == "Validation PCA"
+            else {"eye": {"x": -1 / zoom * 2.35, "y": -1 / zoom * 2.35, "z": 1 / zoom * 2.0}}
+        )
         _scene_layout = {
             "xaxis_title": _axis_labels[0],
             "yaxis_title": _axis_labels[1],
@@ -2415,7 +2469,7 @@ def _(
                 "xanchor": "left",
             },
             template="plotly_white",
-            height=1550,
+            height=1725,
             autosize=True,
             barmode="overlay",
             legend={"orientation": "h", "y": -0.06, "x": 0},
@@ -2424,24 +2478,24 @@ def _(
             scene2=_scene_layout,
             uirevision=f"event-{event_idx}",
         )
-        _fig.update_xaxes(title_text="beta", row=2, col=1)
-        _fig.update_yaxes(title_text="Hits", type="log", row=2, col=1)
-        _fig.update_xaxes(title_text="Truth object id", row=2, col=3)
-        _fig.update_yaxes(title_text="Truth-assigned valid hits", row=2, col=3)
-        _fig.update_xaxes(title_text="Predicted OC seed hit index", row=2, col=5)
-        _fig.update_yaxes(title_text="Assigned valid hits", row=2, col=5)
-        _fig.update_xaxes(title_text="Truth object id", row=3, col=1)
-        _fig.update_yaxes(title_text=r"ET_pred / ET_true", rangemode="tozero", row=3, col=1)
+        _fig.update_xaxes(title_text="beta", row=3, col=1)
+        _fig.update_yaxes(title_text="Hits", type="log", row=3, col=1)
         _fig.update_xaxes(title_text="Truth object id", row=3, col=3)
-        _fig.update_yaxes(title_text="ET recovered [%]", range=[0, 105], row=3, col=3)
-        _fig.update_xaxes(title_text="Truth object id", row=3, col=5)
-        _fig.update_yaxes(title_text="ET purity [%]", range=[0, 105], row=3, col=5)
-        _fig.update_xaxes(title_text="", row=4, col=1)
-        _fig.update_yaxes(title_text="ET [GeV]", rangemode="tozero", row=4, col=1)
+        _fig.update_yaxes(title_text="Truth-assigned valid hits", row=3, col=3)
+        _fig.update_xaxes(title_text="Predicted OC seed hit index", row=3, col=5)
+        _fig.update_yaxes(title_text="Assigned valid hits", row=3, col=5)
+        _fig.update_xaxes(title_text="Truth object id", row=4, col=1)
+        _fig.update_yaxes(title_text=r"ET_pred / ET_true", rangemode="tozero", row=4, col=1)
         _fig.update_xaxes(title_text="Truth object id", row=4, col=3)
-        _fig.update_yaxes(title_text="Purity [%]", range=[0, 105], row=4, col=3)
+        _fig.update_yaxes(title_text="ET recovered [%]", range=[0, 105], row=4, col=3)
         _fig.update_xaxes(title_text="Truth object id", row=4, col=5)
-        _fig.update_yaxes(title_text="Completeness [%]", range=[0, 105], row=4, col=5)
+        _fig.update_yaxes(title_text="ET purity [%]", range=[0, 105], row=4, col=5)
+        _fig.update_xaxes(title_text="", row=5, col=1)
+        _fig.update_yaxes(title_text="ET [GeV]", rangemode="tozero", row=5, col=1)
+        _fig.update_xaxes(title_text="Truth object id", row=5, col=3)
+        _fig.update_yaxes(title_text="Purity [%]", range=[0, 105], row=5, col=3)
+        _fig.update_xaxes(title_text="Truth object id", row=5, col=5)
+        _fig.update_yaxes(title_text="Completeness [%]", range=[0, 105], row=5, col=5)
         return _fig
 
     def format_match_table_value(value):
@@ -2479,24 +2533,25 @@ def _(
             return []
 
         event.truth.require("objects")
-        event.truth.objects.require("impact_energy", "track_pdg_id")
+        event.truth.objects.require("impact_energy", "impact_pt", "track_pdg_id")
 
         unique_object_ids = np.unique(object_ids)
         entries = []
         for object_id in unique_object_ids:
             object_index = int(object_id) - 1
             energy = float(event.truth.objects.impact_energy[object_index])
+            pt = float(event.truth.objects.impact_pt[object_index])
             pdgid = int(event.truth.objects.track_pdg_id[object_index])
-            entries.append((energy, int(object_id), pdgid_to_name(pdgid)))
+            entries.append((energy, int(object_id), pdgid_to_name(pdgid), pt))
 
         entries = sorted(entries, reverse=True)[:top_n]
         return [
             (
                 truth_colors[int(object_id)],
                 f"object {object_id}",
-                f"{particle} ({energy:.1f} GeV, object {object_id})",
+                f"{particle}, {energy:.1f} GeV, pT {pt:.1f} GeV",
             )
-            for energy, object_id, particle in entries
+            for energy, object_id, particle, pt in entries
         ]
 
     return apply_truth_colors_to_event_display, plot_true_vs_pred_oc
@@ -2655,7 +2710,7 @@ def _(mo, np, oc_layout, test_ds, val_cluster_coords, val_data):
 
 @app.cell(hide_code=True)
 def _(
-    best_oc_thresholds,
+    active_oc_thresholds,
     eval_feature_names,
     event_idx_selector,
     mo,
@@ -2675,11 +2730,11 @@ def _(
     z_dim_selector,
 ):
     mo.stop(
-        best_oc_thresholds is None,
+        active_oc_thresholds is None,
         mo.md("Run OC threshold calibration above before using the single-event OC analysis."),
     )
     plt.style.use("default")
-    _tbeta, _td = best_oc_thresholds["tbeta"], best_oc_thresholds["td"]
+    _tbeta, _td = active_oc_thresholds["tbeta"], active_oc_thresholds["td"]
     _fig = plot_true_vs_pred_oc(
         tbeta=_tbeta,
         td=_td,
@@ -2711,6 +2766,7 @@ def _(apply_truth_colors_to_event_display, event_idx_selector, mo, test_ds):
         color_by="hit_object_id",
         views=_views,
         show_cluster_markers=False,
+        cluster_threshold_field="impact_pt",
         energy_threshold=test_ds.metadata["preprocessing"]["truth_min_object_energy"],
     )
     _fig1 = apply_truth_colors_to_event_display(

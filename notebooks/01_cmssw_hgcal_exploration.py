@@ -27,7 +27,7 @@ def _():
     mplhep.style.use("CMS")
 
     PROJECT_ROOT = get_project_root()
-    PROCESSED_DIR = PROJECT_ROOT / "data/processed/cmssw_classical"
+    PROCESSED_DIR = PROJECT_ROOT / "data/processed/cmssw"
     return (
         CaloDataset,
         DatasetRegistry,
